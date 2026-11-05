@@ -108,7 +108,7 @@ export default class ImageToolkit extends Plugin {
   private open(context: Context, tool: Tool) {
     const options: EditorOptions = {
       tool,quality:this.settings.quality,backupEnabled:this.settings.backupEnabled,backupFolder:this.settings.backupFolder,
-      backupConfigured:this.settings.backupConfigured,pluginDir:this.manifest.dir!,
+      backupConfigured:this.settings.backupConfigured,
       getBackupPreferences:()=>({...this.settings}),
       saveBackupPreferences:async preferences=>{
         const next={...this.settings,...preferences,backupConfigured:true};

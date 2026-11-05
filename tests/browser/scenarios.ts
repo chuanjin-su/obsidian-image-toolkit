@@ -67,6 +67,7 @@ export async function runSmoke() {
   next.outputBlob=async()=>{await new Promise(r=>setTimeout(r,100));return new Blob([new Uint8Array([1])],{type:'image/jpeg'});};
   const count=g.saved.length,saving=next.save();next.close();await saving;
   assert(g.saved.length===count,'Close during encode must prevent persistence');checks.push('close during encoding prevents save');
+  assert(g.workerFileReads.length===0,'BRAT installation must never read a separate processing worker file');checks.push('BRAT-compatible embedded worker without extra files');
   assert(g.errors.length===0,`Unhandled browser errors: ${g.errors.join(', ')}`);
   return {checks,saved:g.saved,errors:g.errors};
 }

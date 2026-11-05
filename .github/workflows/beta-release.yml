@@ -33,11 +33,11 @@ jobs:
       - name: Package plugin
         run: |
           node --check main.js
-          node --check processing-worker.js
+          rm -rf dist
           mkdir -p dist/image-toolkit
-          cp main.js manifest.json styles.css processing-worker.js dist/image-toolkit/
+          cp main.js manifest.json styles.css dist/image-toolkit/
           (cd dist && zip -r "image-toolkit-$GITHUB_REF_NAME.zip" image-toolkit)
-          (cd dist/image-toolkit && sha256sum main.js manifest.json styles.css processing-worker.js) > dist/SHA256SUMS.txt
+          (cd dist/image-toolkit && sha256sum main.js manifest.json styles.css) > dist/SHA256SUMS.txt
           (cd dist && sha256sum "image-toolkit-$GITHUB_REF_NAME.zip") >> dist/SHA256SUMS.txt
       - name: Publish GitHub prerelease
         env:
@@ -52,6 +52,5 @@ jobs:
             dist/image-toolkit/main.js \
             dist/image-toolkit/manifest.json \
             dist/image-toolkit/styles.css \
-            dist/image-toolkit/processing-worker.js \
             "dist/image-toolkit-$GITHUB_REF_NAME.zip" \
             dist/SHA256SUMS.txt

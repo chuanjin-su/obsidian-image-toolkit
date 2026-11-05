@@ -3,9 +3,11 @@
 Local static JPEG/PNG/WebP editing in Obsidian.
 
 ## Install the beta
-Download **image-toolkit-0.2.0.zip** from the [0.2.0 Beta release](https://github.com/chuanjin-su/obsidian-image-toolkit/releases/tag/0.2.0). Extract it and copy the enclosed `image-toolkit` folder into your vault's `.obsidian/plugins/`, then reload Obsidian and enable the plugin. Obsidian desktop 1.6.0+ is required.
+**BRAT:** add `chuanjin-su/obsidian-image-toolkit` and select **0.2.1** or newer. If already installed, check for updates in BRAT and reload Obsidian (or disable/re-enable Image Toolkit). If pinned to 0.2.0, change the selected version. Version 0.2.1 fixes the missing-worker error in Board/Adjust on BRAT installs.
 
-For manual installation, download all four assets: `main.js`, `manifest.json`, `styles.css`, and `processing-worker.js`. The worker is required. This is a prerelease; test with disposable images first. See [release notes](RELEASE_NOTES.md).
+**Manual:** download **image-toolkit-0.2.1.zip** from the [0.2.1 Beta release](https://github.com/chuanjin-su/obsidian-image-toolkit/releases/tag/0.2.1). Extract it and copy the enclosed `image-toolkit` folder into your vault's `.obsidian/plugins/`, then reload Obsidian and enable the plugin. Obsidian desktop 1.6.0+ is required.
+
+For manual installation without the ZIP, download the three standard assets: `main.js`, `manifest.json`, and `styles.css`. The background worker is embedded in `main.js`; no extra worker file is needed. This is a prerelease; test with disposable images first. See [release notes](RELEASE_NOTES.md).
 
 ## Use
 Reload the plugin (or Obsidian) after rebuilding. Enable **Image Toolkit** in Community plugins if needed. Right-click an image/file → **Edit image** (the only image-menu action), or run **Image Toolkit: Edit image at cursor**.
@@ -41,11 +43,11 @@ npm run test:browser
 # Then: await runImageToolkitAdjustmentChecks() // 10 adjustment cases
 # Then: await runImageToolkitAnnotationChecks() // 6 interaction cases
 # Then: await runImageToolkitBackupChecks() // 7 onboarding cases
-# Then: await runImageToolkitSmoke() // 12 editing scenarios
+# Then: await runImageToolkitSmoke() // 13 editing / BRAT scenarios
 # Ctrl-C, or POST /__stop, to stop the loopback server.
 ```
 
 ## Publish a beta
-Update `manifest.json`, `package.json`, `package-lock.json`, `versions.json` and `RELEASE_NOTES.md` for the intended version. Push a tag matching `manifest.version` exactly (no `v` prefix). GitHub Actions validates, tests and builds the plugin, then publishes a **prerelease** containing the four plugin files, an installable ZIP and SHA-256 checksums. It does not publish stable releases.
+Update `manifest.json`, `package.json`, `package-lock.json`, `versions.json` and `RELEASE_NOTES.md` for the intended version. Push a tag matching `manifest.version` exactly (no `v` prefix). GitHub Actions validates, tests and builds the plugin, then publishes a **prerelease** containing the three standard plugin files, an installable ZIP and SHA-256 checksums. It does not publish stable releases.
 
 Project tracking: vault-root **Image Toolkit** Markdown notes.

@@ -5,13 +5,14 @@ import { saveImage } from './storage';
 import { fitPreviewSize, rectangleCorners } from './preview';
 import { DEFAULT_ADJUSTMENTS, hasAdjustments, type BasicAdjustments } from './adjustments';
 import type { ProcessingRequest } from './processing-worker';
+import processingWorkerSource from 'image-toolkit:processing-worker';
 import { BackupPrompt } from './backup-dialog';
 import type { BackupPreferences } from './settings';
 import { markBounds, moveMark, resizeBounds, resizeMark, hitTestMark, selectionHandles, type MarkKind, type Mark, type Bounds, type Corner } from './annotations';
 
 export type Tool = 'compress' | 'resize' | 'crop' | 'adjust' | 'annotate';
 export interface EditorOptions {
-  tool:Tool;quality:number;backupEnabled:boolean;backupFolder:string;backupConfigured?:boolean;pluginDir:string;
+  tool:Tool;quality:number;backupEnabled:boolean;backupFolder:string;backupConfigured?:boolean;
   getBackupPreferences?:()=>BackupPreferences&{backupConfigured:boolean};
   saveBackupPreferences?:(preferences:BackupPreferences)=>Promise<void>;
 }
@@ -530,9 +531,8 @@ export class ImageEditor extends Modal {
   }
   private async process(request:Omit<ProcessingRequest,'id'|'data'>&{data:ArrayBufferLike}) {
     if(!this.workerReady)this.workerReady=(async()=>{
-      const source=await this.app.vault.adapter.read(`${this.options.pluginDir}/processing-worker.js`);
       if(this.closed)throw new Error('Editor closed.');
-      this.workerUrl=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+      this.workerUrl=URL.createObjectURL(new Blob([processingWorkerSource],{type:'text/javascript'}));
       const worker=new Worker(this.workerUrl);this.worker=worker;
       worker.onmessage=event=>{if(this.worker!==worker)return;const r=event.data,job=this.jobs.get(r.id);if(!job)return;this.jobs.delete(r.id);window.clearTimeout(job.timer);r.error?job.reject(new Error(r.error)):job.resolve(r);};
       worker.onerror=event=>{if(this.worker===worker)this.stopWorker(new Error(event.message||'Background processing failed.'));};
