@@ -3,6 +3,7 @@ import { ImageEditor, type EditorOptions, type Tool } from './editor';
 import { findImageEmbeds, isRemote, supportedExtension } from './embeds';
 import { normalizeBackupFolder } from './storage';
 import { DEFAULT_SETTINGS, loadSettings, type PluginSettings } from './settings';
+import { ImageRecovery } from './recovery-dialog';
 interface Context { file: TFile }
 
 export default class ImageToolkit extends Plugin {
@@ -14,6 +15,7 @@ export default class ImageToolkit extends Plugin {
   private extendedMenus = new WeakSet<Menu>();
   private menuTimers = new Set<number>();
   private editors = new Set<ImageEditor>();
+  private recoveries = new Set<ImageRecovery>();
 
   async onload() {
     this.settings = loadSettings(await this.loadData());
@@ -53,7 +55,7 @@ export default class ImageToolkit extends Plugin {
     this.registerEvent(this.app.workspace.on('active-leaf-change', attach));
   }
 
-  onunload() { for (const editor of this.editors) editor.close(); }
+  onunload() { for (const editor of this.editors) editor.close();for (const recovery of this.recoveries) recovery.close(); }
 
   private resolve(link: string, notePath: string): TFile | null {
     if (isRemote(link)) return null;
@@ -69,7 +71,7 @@ export default class ImageToolkit extends Plugin {
       this.imageClick = false;
       this.menuHandled = false;
       const el = event.target as HTMLElement | null;
-      if (!el || el.closest('.image-toolkit-modal')) return;
+      if (!el || el.closest('.image-toolkit-modal, .image-toolkit-recovery')) return;
       const img = el.closest('img');
       if (!img) return;
       this.imageClick = true;
@@ -103,6 +105,14 @@ export default class ImageToolkit extends Plugin {
     this.extendedMenus.add(menu);
     menu.addSeparator();
     menu.addItem(item=>item.setTitle('Edit image').setIcon('image').onClick(()=>this.open(context,'compress')));
+    if (this.settings.backupEnabled) menu.addItem(item=>item.setTitle('Recover image').setIcon('history').onClick(()=>this.recover(context)));
+  }
+
+  private recover(context: Context) {
+    if (!this.settings.backupEnabled) return;
+    const recovery = new ImageRecovery(this.app,context.file,this.settings.backupFolder,()=>this.recoveries.delete(recovery));
+    this.recoveries.add(recovery);
+    recovery.open();
   }
 
   private open(context: Context, tool: Tool) {

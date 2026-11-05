@@ -147,6 +147,24 @@ async function assertBackupWritten(
   }
 }
 
+// Editor saves and recoveries share this queue, even across separate dialogs.
+const imageSaveQueues = new WeakMap<App['vault'], WeakMap<TFile, Promise<void>>>();
+
+async function withImageSaveLock<T>(app: App, source: TFile, action: () => Promise<T>): Promise<T> {
+  let queue = imageSaveQueues.get(app.vault);
+  if (!queue) { queue = new WeakMap();imageSaveQueues.set(app.vault, queue); }
+  const previous = queue.get(source) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>(resolve => { release = resolve; });
+  queue.set(source, current);
+  await previous;
+  try { return await action(); }
+  finally {
+    release();
+    if (queue.get(source) === current) queue.delete(source);
+  }
+}
+
 export async function saveImage(
   app: App,
   source: TFile,
@@ -159,22 +177,25 @@ export async function saveImage(
   const sourcePath = source.path;
   const originalSnapshot = originalBytes.slice(0);
   const outputSnapshot = output.slice(0);
-  assertSourceStillPresent(app, source, sourcePath);
+  const preferences = { ...options };
+  return withImageSaveLock(app, source, async () => {
+    // Check snapshots only after acquiring the lock, including when an earlier write failed.
+    assertSourceStillPresent(app, source, sourcePath);
+    if (!preferences.backupEnabled) {
+      await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
+      assertSourceStillPresent(app, source, sourcePath);
+      await app.vault.modifyBinary(source, outputSnapshot.slice(0));
+      return { path: sourcePath };
+    }
 
-  if (!options.backupEnabled) {
+    const backupFolder = normalizeBackupFolder(preferences.backupFolder);
+    await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
+    const backup = await createUniqueBackup(app, sourcePath, backupFolder, originalSnapshot);
+    await assertBackupWritten(app, backup, originalSnapshot);
+    // Keep a successfully-created backup if the source changed while the backup was written.
     await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
     assertSourceStillPresent(app, source, sourcePath);
     await app.vault.modifyBinary(source, outputSnapshot.slice(0));
-    return { path: sourcePath };
-  }
-
-  const backupFolder = normalizeBackupFolder(options.backupFolder);
-  await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
-  const backup = await createUniqueBackup(app, sourcePath, backupFolder, originalSnapshot);
-  await assertBackupWritten(app, backup, originalSnapshot);
-  // Keep a successfully-created backup if the source changed while the backup was written.
-  await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
-  assertSourceStillPresent(app, source, sourcePath);
-  await app.vault.modifyBinary(source, outputSnapshot.slice(0));
-  return { path: sourcePath, backupPath: backup.path };
+    return { path: sourcePath, backupPath: backup.path };
+  });
 }

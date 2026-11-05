@@ -72,6 +72,25 @@
 .image-toolkit-compare { width: min(1200px, 95vw); }
 .image-toolkit-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .image-toolkit-comparison img { max-width: 100%; max-height: 70vh; object-fit: contain; }
+/* Recovery keeps version metadata and the confirmation action visible. */
+.modal.image-toolkit-recovery { width: min(900px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; }
+.image-toolkit-recovery > .modal-content { min-height: 0; overflow: auto; }
+.image-toolkit-recovery-path { overflow-wrap: anywhere; color: var(--text-muted); font-size: 12px; }
+.image-toolkit-recovery-layout { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(0, 1fr); gap: 16px; }
+.image-toolkit-recovery-versions { max-height: 48vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.image-toolkit-recovery-version { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; height: auto; min-height: 90px; padding: 10px; text-align: left; white-space: normal; }
+.image-toolkit-recovery-version[aria-pressed="true"] { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+.image-toolkit-recovery-version > img { width: 80px; height: 64px; object-fit: contain; flex: 0 0 auto; }
+.image-toolkit-recovery-version > span { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.image-toolkit-recovery-preview { min-width: 0; }
+.image-toolkit-recovery-preview > img { width: 100%; max-height: 32vh; object-fit: contain; }
+.image-toolkit-recovery-preview > p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.image-toolkit-recovery-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 620px) {
+  .image-toolkit-recovery-layout { grid-template-columns: minmax(0, 1fr); }
+  .image-toolkit-recovery-versions { max-height: 30vh; }
+  .image-toolkit-recovery-preview > img { max-height: 20vh; }
+}
 @media (max-height: 680px) {
   .image-toolkit-crop-previews .image-toolkit-board-preview { max-height: 64px; }
   .image-toolkit-crop-previews .image-toolkit-magnifier { width: 112px; height: 84px; }

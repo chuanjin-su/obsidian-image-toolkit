@@ -1,16 +1,16 @@
-# Image Toolkit 0.2 — desktop beta
+# Image Toolkit 0.2.2 — desktop beta
 
 Local static JPEG/PNG/WebP editing in Obsidian.
 
 ## Install the beta
-**BRAT:** add `chuanjin-su/obsidian-image-toolkit` and select **0.2.1** or newer. If already installed, check for updates in BRAT and reload Obsidian (or disable/re-enable Image Toolkit). If pinned to 0.2.0, change the selected version. Version 0.2.1 fixes the missing-worker error in Board/Adjust on BRAT installs.
+**BRAT:** add `chuanjin-su/obsidian-image-toolkit` and select **0.2.2** or newer. If already installed, check for updates in BRAT and reload Obsidian (or disable/re-enable Image Toolkit). If pinned to an older beta, change the selected version. Version 0.2.2 adds backup recovery and refreshes rendered images after saving; it retains the embedded-worker fix for BRAT installs.
 
-**Manual:** download **image-toolkit-0.2.1.zip** from the [0.2.1 Beta release](https://github.com/chuanjin-su/obsidian-image-toolkit/releases/tag/0.2.1). Extract it and copy the enclosed `image-toolkit` folder into your vault's `.obsidian/plugins/`, then reload Obsidian and enable the plugin. Obsidian desktop 1.6.0+ is required.
+**Manual:** download **image-toolkit-0.2.2.zip** from the [0.2.2 Beta release](https://github.com/chuanjin-su/obsidian-image-toolkit/releases/tag/0.2.2). Extract it and copy the enclosed `image-toolkit` folder into your vault's `.obsidian/plugins/`, then reload Obsidian and enable the plugin. Obsidian desktop 1.6.0+ is required.
 
 For manual installation without the ZIP, download the three standard assets: `main.js`, `manifest.json`, and `styles.css`. The background worker is embedded in `main.js`; no extra worker file is needed. This is a prerelease; test with disposable images first. See [release notes](RELEASE_NOTES.md).
 
 ## Use
-Reload the plugin (or Obsidian) after rebuilding. Enable **Image Toolkit** in Community plugins if needed. Right-click an image/file → **Edit image** (the only image-menu action), or run **Image Toolkit: Edit image at cursor**.
+Reload the plugin (or Obsidian) after rebuilding. Enable **Image Toolkit** in Community plugins if needed. Right-click an image/file → **Edit image**, or run **Image Toolkit: Edit image at cursor**.
 
 - **Zoom:** 100% fits both width and height. Higher values zoom relative to fit; scroll to pan.
 - **Quality:** bottom-left beside dimensions and output size. After 300 ms the main canvas shows the encoded/decoded result. JPEG/WebP only; PNG remains lossless.
@@ -21,6 +21,7 @@ Reload the plugin (or Obsidian) after rebuilding. Enable **Image Toolkit** in Co
 - **Annotate:** choose the icon buttons for selection, pen, highlighter, arrow, rectangle, ellipse or text. Select / move exposes corner resize handles (arrows use endpoints). Selected text supports resizing, font/color changes and **Edit text**. Raster operations flatten annotations; Undo restores them.
 - **Save image:** always overwrites the original path and preserves its format. Rendered copies refresh immediately across open panes and pop-out windows, without reopening the note or changing its text. There is no copy/overwrite toggle or format-conversion option.
 - **First Save:** backups start **off**. A dialog asks whether to enable backups and which vault-relative folder to use. Continue remembers the choice; Cancel writes nothing. Change it later in Settings → Image Toolkit. When enabled, each overwrite gets a unique original-byte backup with source subfolders mirrored. A failed backup cancels saving. Legacy settings without the new confirmation marker ask again instead of silently retaining the former default-on behavior.
+- **Recover image:** when backups are enabled, this appears directly below **Edit image** in the image/file menu. The popup lists backups newest first with thumbnails, date/time, file size, pixel dimensions, format and filename; select one for a larger preview, then **Restore selected version**. Restoring preserves the current bytes in a new verified backup first, keeps existing history, and refreshes the image in open notes. Cancel writes nothing. Only the currently configured backup folder is searched; switch back to a previous folder to find older backups. If no versions exist, the popup explains this and disables Restore.
 - Cancel before saving leaves files untouched. Crop/resize changes require Apply before Save.
 
 ## Compact layout
@@ -43,6 +44,7 @@ npm run test:browser
 # Then: await runImageToolkitAdjustmentChecks() // 10 adjustment cases
 # Then: await runImageToolkitAnnotationChecks() // 6 interaction cases
 # Then: await runImageToolkitBackupChecks() // 7 onboarding cases
+# Then: await runImageToolkitRecoveryChecks() // 9 recovery / safety / metadata cases
 # Then: await runImageToolkitSmoke() // 14 editing / refresh / BRAT scenarios
 # Ctrl-C, or POST /__stop, to stop the loopback server.
 ```

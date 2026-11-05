@@ -1,7 +1,7 @@
 {
   "id": "image-toolkit",
   "name": "Image Toolkit",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "minAppVersion": "1.6.0",
   "description": "Local image compression, resizing, crop, perspective board correction and annotation.",
   "author": "Image Toolkit",

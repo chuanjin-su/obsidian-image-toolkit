@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => ImageToolkit
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/editor.ts
 var import_obsidian2 = require("obsidian");
@@ -233,26 +233,50 @@ async function assertBackupWritten(app, backup, originalBytes) {
     throw new Error("The backup image could not be verified.");
   }
 }
+var imageSaveQueues = /* @__PURE__ */ new WeakMap();
+async function withImageSaveLock(app, source, action) {
+  let queue = imageSaveQueues.get(app.vault);
+  if (!queue) {
+    queue = /* @__PURE__ */ new WeakMap();
+    imageSaveQueues.set(app.vault, queue);
+  }
+  const previous = queue.get(source) ?? Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  queue.set(source, current);
+  await previous;
+  try {
+    return await action();
+  } finally {
+    release();
+    if (queue.get(source) === current) queue.delete(source);
+  }
+}
 async function saveImage(app, source, originalBytes, output, options) {
   if (output.byteLength === 0) throw new Error("Cannot save an empty image.");
   const sourcePath = source.path;
   const originalSnapshot = originalBytes.slice(0);
   const outputSnapshot = output.slice(0);
-  assertSourceStillPresent(app, source, sourcePath);
-  if (!options.backupEnabled) {
+  const preferences = { ...options };
+  return withImageSaveLock(app, source, async () => {
+    assertSourceStillPresent(app, source, sourcePath);
+    if (!preferences.backupEnabled) {
+      await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
+      assertSourceStillPresent(app, source, sourcePath);
+      await app.vault.modifyBinary(source, outputSnapshot.slice(0));
+      return { path: sourcePath };
+    }
+    const backupFolder = normalizeBackupFolder(preferences.backupFolder);
+    await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
+    const backup = await createUniqueBackup(app, sourcePath, backupFolder, originalSnapshot);
+    await assertBackupWritten(app, backup, originalSnapshot);
     await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
     assertSourceStillPresent(app, source, sourcePath);
     await app.vault.modifyBinary(source, outputSnapshot.slice(0));
-    return { path: sourcePath };
-  }
-  const backupFolder = normalizeBackupFolder(options.backupFolder);
-  await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
-  const backup = await createUniqueBackup(app, sourcePath, backupFolder, originalSnapshot);
-  await assertBackupWritten(app, backup, originalSnapshot);
-  await assertSourceUnchanged(app, source, sourcePath, originalSnapshot);
-  assertSourceStillPresent(app, source, sourcePath);
-  await app.vault.modifyBinary(source, outputSnapshot.slice(0));
-  return { path: sourcePath, backupPath: backup.path };
+    return { path: sourcePath, backupPath: backup.path };
+  });
 }
 
 // src/refresh.ts
@@ -1749,8 +1773,259 @@ Backup: ${result.backupPath}` : ""}`, 8e3);
   }
 };
 
+// src/recovery-dialog.ts
+var import_obsidian3 = require("obsidian");
+
+// src/recovery.ts
+function sourceParent2(path) {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? "" : path.slice(0, slash);
+}
+function sourceFilename2(path) {
+  const filename = path.slice(path.lastIndexOf("/") + 1);
+  const dot = filename.lastIndexOf(".");
+  if (dot < 0) return { basename: filename, extension: "" };
+  return { basename: filename.slice(0, dot), extension: filename.slice(dot) };
+}
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function findImageBackups(app, source, backupFolder) {
+  const normalizedFolder = normalizeBackupFolder(backupFolder);
+  const { basename, extension } = sourceFilename2(source.path);
+  const directory = [normalizedFolder, sourceParent2(source.path)].filter(Boolean).join("/");
+  const filenamePattern = new RegExp(
+    `^${escapeRegExp(basename)}-backup-(\\d+)(?:-(\\d+))?${escapeRegExp(extension)}$`
+  );
+  const backups = [];
+  for (const file of app.vault.getFiles()) {
+    const slash = file.path.lastIndexOf("/");
+    const fileDirectory = slash < 0 ? "" : file.path.slice(0, slash);
+    if (fileDirectory !== directory) continue;
+    const match = filenamePattern.exec(file.path.slice(slash + 1));
+    if (!match) continue;
+    const timestamp = Number(match[1]);
+    const collision = match[2] === void 0 ? 0 : Number(match[2]);
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0 || !Number.isFinite(new Date(timestamp).getTime()) || String(timestamp) !== match[1] || !Number.isSafeInteger(collision) || collision < 0 || String(collision) !== (match[2] ?? "0") || match[2] !== void 0 && collision === 0) continue;
+    backups.push({ file, path: file.path, timestamp, collision });
+  }
+  return backups.sort((left, right) => right.timestamp - left.timestamp || right.collision - left.collision);
+}
+function assertBackupStillPresent(app, source, version, backupFolder) {
+  const stillAvailable = findImageBackups(app, source, backupFolder).some(
+    (candidate) => candidate.file === version.file && candidate.path === version.path && candidate.timestamp === version.timestamp && candidate.collision === version.collision && version.file.path === version.path && app.vault.getAbstractFileByPath(version.path) === version.file
+  );
+  if (!stillAvailable) throw new Error("The selected backup is no longer available for this image.");
+}
+async function restoreImageBackup(app, source, version, originalBytes, backupBytes, backupFolder) {
+  const selectedVersion = { ...version };
+  const originalSnapshot = originalBytes.slice(0);
+  const backupSnapshot = backupBytes.slice(0);
+  assertBackupStillPresent(app, source, selectedVersion, backupFolder);
+  const restoredBytes = await app.vault.readBinary(selectedVersion.file);
+  assertBackupStillPresent(app, source, selectedVersion, backupFolder);
+  if (!bytesEqual(restoredBytes, backupSnapshot)) {
+    throw new Error("The selected backup changed after it was previewed.");
+  }
+  assertStaticImage(restoredBytes, source.extension.toLowerCase());
+  return saveImage(app, source, originalSnapshot, restoredBytes, {
+    backupEnabled: true,
+    backupFolder
+  });
+}
+
+// src/recovery-dialog.ts
+function formatImageBytes(bytes) {
+  const exact = `${bytes.toLocaleString()} bytes`;
+  if (bytes < 1024) return exact;
+  const unit = bytes < 1024 * 1024 ? "KB" : "MB";
+  const divisor = unit === "KB" ? 1024 : 1024 * 1024;
+  return `${(bytes / divisor).toFixed(2)} ${unit} (${exact})`;
+}
+var ImageRecovery = class extends import_obsidian3.Modal {
+  constructor(app, file, backupFolder, didClose = () => {
+  }) {
+    super(app);
+    this.file = file;
+    this.backupFolder = backupFolder;
+    this.didClose = didClose;
+    this.closed = false;
+    this.restoring = false;
+    this.selectionVersion = 0;
+    this.rows = [];
+    this.urls = /* @__PURE__ */ new Set();
+    this.sourcePath = file.path;
+  }
+  async onOpen() {
+    this.modalEl.addClass("image-toolkit-recovery");
+    this.titleEl.setText("Recover image");
+    this.contentEl.empty();
+    this.contentEl.createEl("p", { text: this.sourcePath, cls: "image-toolkit-recovery-path" });
+    this.contentEl.createEl("p", { text: "Select a backup to restore. This replaces the shared image in every note. The current image will be backed up first." });
+    const layout = this.contentEl.createDiv("image-toolkit-recovery-layout");
+    const list = layout.createDiv("image-toolkit-recovery-versions");
+    list.setAttribute("role", "group");
+    list.setAttribute("aria-label", "Backup versions");
+    list.createEl("p", { text: "Loading backup versions\u2026" });
+    const panel = layout.createDiv("image-toolkit-recovery-preview");
+    this.preview = panel.createEl("img", { attr: { alt: "Selected backup preview" } });
+    this.preview.hidden = true;
+    this.details = panel.createEl("p", { text: "Select a version to preview it." });
+    this.status = this.contentEl.createEl("p", { attr: { role: "status", "aria-live": "polite" } });
+    const actions = this.contentEl.createDiv("image-toolkit-recovery-actions");
+    this.cancelButton = actions.createEl("button", { text: "Cancel" });
+    this.cancelButton.onclick = () => this.close();
+    this.restoreButton = actions.createEl("button", { text: "Restore selected version", cls: "mod-cta" });
+    this.restoreButton.disabled = true;
+    this.restoreButton.onclick = () => {
+      void this.restore();
+    };
+    try {
+      const versions = findImageBackups(this.app, this.file, this.backupFolder);
+      list.empty();
+      if (versions.length === 0) {
+        list.createEl("p", { text: `No backups found for this image in ${this.backupFolder}.` });
+        return;
+      }
+      this.original = await this.app.vault.readBinary(this.file);
+      if (this.closed) return;
+      this.assertSourcePresent();
+      for (const version of versions) this.addVersion(list, version);
+      this.status.setText(`${versions.length} backup version${versions.length === 1 ? "" : "s"} \xB7 Newest first`);
+    } catch (error) {
+      if (!this.closed) {
+        list.empty();
+        this.showError(error);
+      }
+    }
+  }
+  onClose() {
+    this.closed = true;
+    ++this.selectionVersion;
+    for (const url of this.urls) URL.revokeObjectURL(url);
+    this.urls.clear();
+    this.preview?.removeAttribute("src");
+    this.selected = void 0;
+    this.original = void 0;
+    this.didClose();
+  }
+  addVersion(list, version) {
+    const row = list.createEl("button", { cls: "image-toolkit-recovery-version", attr: { type: "button", "aria-pressed": "false" } });
+    row.title = version.path;
+    const thumbnail = row.createEl("img", { attr: { alt: "", loading: "lazy" } });
+    const metadata = row.createSpan();
+    metadata.createEl("strong", { text: new Date(version.timestamp).toLocaleString() });
+    metadata.createSpan({ text: `${formatImageBytes(version.file.stat.size)} \xB7 ${version.file.extension.toUpperCase()}` });
+    const dimensions = metadata.createSpan({ text: "Loading dimensions\u2026" });
+    metadata.createSpan({ text: version.file.name, cls: "image-toolkit-recovery-path" });
+    thumbnail.onload = () => {
+      if (!this.closed) dimensions.setText(`${thumbnail.naturalWidth} \xD7 ${thumbnail.naturalHeight} px`);
+    };
+    thumbnail.onerror = () => {
+      if (!this.closed) dimensions.setText("Preview unavailable");
+    };
+    thumbnail.src = this.app.vault.getResourcePath(version.file);
+    row.onclick = () => {
+      void this.selectVersion(version, row);
+    };
+    this.rows.push(row);
+  }
+  async selectVersion(version, row) {
+    if (this.closed || this.restoring) return;
+    const request = ++this.selectionVersion;
+    this.selected = void 0;
+    this.restoreButton.disabled = true;
+    this.preview.hidden = true;
+    this.preview.removeAttribute("src");
+    if (this.selectedUrl) {
+      this.releaseUrl(this.selectedUrl);
+      this.selectedUrl = void 0;
+    }
+    for (const candidate of this.rows) candidate.setAttribute("aria-pressed", String(candidate === row));
+    this.details.setText("Loading selected backup\u2026");
+    this.status.removeClass("image-toolkit-error");
+    this.status.setText("");
+    let url;
+    try {
+      if (version.file.path !== version.path || this.app.vault.getAbstractFileByPath(version.path) !== version.file) {
+        throw new Error("This backup was moved or removed. Reopen Recover image to refresh the list.");
+      }
+      const bytes = await this.app.vault.readBinary(version.file);
+      if (this.closed || request !== this.selectionVersion) return;
+      assertStaticImage(bytes, this.file.extension.toLowerCase());
+      url = URL.createObjectURL(new Blob([bytes]));
+      this.urls.add(url);
+      const probe = this.containerEl.ownerDocument.createElement("img");
+      probe.src = url;
+      await probe.decode();
+      if (this.closed || request !== this.selectionVersion) return;
+      this.selected = { version, bytes };
+      this.selectedUrl = url;
+      this.preview.src = url;
+      this.preview.hidden = false;
+      this.details.setText(`${new Date(version.timestamp).toLocaleString()}
+${probe.naturalWidth} \xD7 ${probe.naturalHeight} px \xB7 ${this.file.extension.toUpperCase()}
+${formatImageBytes(bytes.byteLength)}
+${version.path}`);
+      this.restoreButton.disabled = false;
+      this.status.setText("The current version will be backed up before restoring.");
+    } catch (error) {
+      if (!this.closed && request === this.selectionVersion) {
+        this.details.setText("Cannot use this backup. Select another version.");
+        this.showError(error);
+      }
+    } finally {
+      if (url && url !== this.selectedUrl) this.releaseUrl(url);
+    }
+  }
+  async restore() {
+    if (this.closed || this.restoring || !this.selected || !this.original) return;
+    const { version, bytes } = this.selected;
+    this.restoring = true;
+    this.restoreButton.disabled = true;
+    this.cancelButton.disabled = true;
+    for (const row of this.rows) row.disabled = true;
+    this.status.removeClass("image-toolkit-error");
+    this.status.setText("Backing up the current image and restoring\u2026");
+    try {
+      this.assertSourcePresent();
+      const result = await restoreImageBackup(this.app, this.file, version, this.original, bytes, this.backupFolder);
+      try {
+        refreshImageViews(this.app, this.file, this.containerEl.ownerDocument);
+      } catch (error) {
+        console.error("Image Toolkit: recovered image refresh failed.", error);
+        new import_obsidian3.Notice("Image recovered. Reopen the note if its preview has not refreshed.");
+      }
+      new import_obsidian3.Notice(`Recovered ${result.path}
+Previous version backed up: ${result.backupPath}`, 8e3);
+      if (!this.closed) this.close();
+    } catch (error) {
+      if (!this.closed) this.showError(error);
+    } finally {
+      this.restoring = false;
+      if (!this.closed) {
+        this.restoreButton.disabled = !this.selected;
+        this.cancelButton.disabled = false;
+        for (const row of this.rows) row.disabled = false;
+      }
+    }
+  }
+  assertSourcePresent() {
+    if (this.file.path !== this.sourcePath || this.app.vault.getAbstractFileByPath(this.sourcePath) !== this.file) {
+      throw new Error("The source image was moved or removed. Reopen Recover image.");
+    }
+  }
+  showError(error) {
+    this.status.addClass("image-toolkit-error");
+    this.status.setText(error instanceof Error ? error.message : String(error));
+  }
+  releaseUrl(url) {
+    if (this.urls.delete(url)) URL.revokeObjectURL(url);
+  }
+};
+
 // src/main.ts
-var ImageToolkit = class extends import_obsidian3.Plugin {
+var ImageToolkit = class extends import_obsidian4.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
@@ -1760,6 +2035,7 @@ var ImageToolkit = class extends import_obsidian3.Plugin {
     this.extendedMenus = /* @__PURE__ */ new WeakSet();
     this.menuTimers = /* @__PURE__ */ new Set();
     this.editors = /* @__PURE__ */ new Set();
+    this.recoveries = /* @__PURE__ */ new Set();
   }
   async onload() {
     this.settings = loadSettings(await this.loadData());
@@ -1769,7 +2045,7 @@ var ImageToolkit = class extends import_obsidian3.Plugin {
     });
     this.addSettingTab(new ToolkitSettings(this.app, this));
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
-      if (file instanceof import_obsidian3.TFile && supportedExtension(file.path)) {
+      if (file instanceof import_obsidian4.TFile && supportedExtension(file.path)) {
         const context = this.clicked?.file.path === file.path ? this.clicked : { file };
         this.addMenu(menu, context);
         if (this.clicked?.file.path === file.path) this.menuHandled = true;
@@ -1795,7 +2071,7 @@ var ImageToolkit = class extends import_obsidian3.Plugin {
       const embed = findImageEmbeds(editor.getValue()).find((e) => e.start <= offset && offset <= e.end);
       const file = embed && view.file && this.resolve(embed.link, view.file.path);
       if (file && embed && view.file) this.open({ file }, "compress");
-      else new import_obsidian3.Notice("Place the cursor on a local JPEG, PNG or WebP embed.");
+      else new import_obsidian4.Notice("Place the cursor on a local JPEG, PNG or WebP embed.");
     } });
     const attach = () => {
       this.attachDocument(document);
@@ -1807,6 +2083,7 @@ var ImageToolkit = class extends import_obsidian3.Plugin {
   }
   onunload() {
     for (const editor of this.editors) editor.close();
+    for (const recovery of this.recoveries) recovery.close();
   }
   resolve(link, notePath) {
     if (isRemote(link)) return null;
@@ -1821,7 +2098,7 @@ var ImageToolkit = class extends import_obsidian3.Plugin {
       this.imageClick = false;
       this.menuHandled = false;
       const el = event.target;
-      if (!el || el.closest(".image-toolkit-modal")) return;
+      if (!el || el.closest(".image-toolkit-modal, .image-toolkit-recovery")) return;
       const img = el.closest("img");
       if (!img) return;
       this.imageClick = true;
@@ -1838,7 +2115,7 @@ var ImageToolkit = class extends import_obsidian3.Plugin {
       const x = event.clientX, y = event.clientY;
       const timer = window.setTimeout(() => {
         if (!this.menuHandled) {
-          const menu = new import_obsidian3.Menu();
+          const menu = new import_obsidian4.Menu();
           this.addMenu(menu, context);
           menu.showAtPosition({ x, y });
         }
@@ -1854,6 +2131,13 @@ var ImageToolkit = class extends import_obsidian3.Plugin {
     this.extendedMenus.add(menu);
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("Edit image").setIcon("image").onClick(() => this.open(context, "compress")));
+    if (this.settings.backupEnabled) menu.addItem((item) => item.setTitle("Recover image").setIcon("history").onClick(() => this.recover(context)));
+  }
+  recover(context) {
+    if (!this.settings.backupEnabled) return;
+    const recovery = new ImageRecovery(this.app, context.file, this.settings.backupFolder, () => this.recoveries.delete(recovery));
+    this.recoveries.add(recovery);
+    recovery.open();
   }
   open(context, tool) {
     const options = {
@@ -1874,7 +2158,7 @@ var ImageToolkit = class extends import_obsidian3.Plugin {
     editor.open();
   }
 };
-var ToolkitSettings = class extends import_obsidian3.PluginSettingTab {
+var ToolkitSettings = class extends import_obsidian4.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1882,15 +2166,15 @@ var ToolkitSettings = class extends import_obsidian3.PluginSettingTab {
   display() {
     this.containerEl.empty();
     this.containerEl.createEl("h2", { text: "Image Toolkit" });
-    new import_obsidian3.Setting(this.containerEl).setName("Default quality").setDesc("JPEG / WebP only. PNG is lossless.").addSlider((slider) => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian4.Setting(this.containerEl).setName("Default quality").setDesc("JPEG / WebP only. PNG is lossless.").addSlider((slider) => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async (value) => {
       this.plugin.settings.quality = value;
       await this.plugin.saveData(this.plugin.settings);
     }));
-    new import_obsidian3.Setting(this.containerEl).setName("Back up before overwriting").setDesc("Every Save replaces the original file. When enabled, preserve its previous bytes in the backup folder first. A failed backup cancels saving.").addToggle((toggle) => toggle.setValue(this.plugin.settings.backupEnabled).onChange(async (value) => {
+    new import_obsidian4.Setting(this.containerEl).setName("Back up before overwriting").setDesc("Every Save replaces the original file. When enabled, preserve its previous bytes in the backup folder first. A failed backup cancels saving.").addToggle((toggle) => toggle.setValue(this.plugin.settings.backupEnabled).onChange(async (value) => {
       this.plugin.settings.backupEnabled = value;
       await this.plugin.saveData(this.plugin.settings);
     }));
-    new import_obsidian3.Setting(this.containerEl).setName("Backup folder").setDesc("Vault-relative folder. Source subfolders are mirrored and each overwrite gets a separate backup.").addText((text) => {
+    new import_obsidian4.Setting(this.containerEl).setName("Backup folder").setDesc("Vault-relative folder. Source subfolders are mirrored and each overwrite gets a separate backup.").addText((text) => {
       text.setPlaceholder(DEFAULT_SETTINGS.backupFolder).setValue(this.plugin.settings.backupFolder);
       text.inputEl.addEventListener("change", () => {
         void (async () => {
