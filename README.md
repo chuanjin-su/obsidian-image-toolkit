@@ -40,6 +40,4 @@ npm run test:browser
 # Ctrl-C, or POST /__stop, to stop the loopback server.
 ```
 
-The browser harness uses an in-memory vault and never writes the real fixture. Ship `manifest.json`, `main.js`, `styles.css`, `processing-worker.js`; exclude `node_modules`.
-
 Project tracking: vault-root **Image Toolkit** Markdown notes.
