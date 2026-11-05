@@ -23,10 +23,10 @@ __export(main_exports, {
   default: () => ImageToolkit
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/editor.ts
-var import_obsidian = require("obsidian");
+var import_obsidian2 = require("obsidian");
 
 // src/embeds.ts
 function findImageEmbeds(text) {
@@ -267,6 +267,346 @@ function rectangleCorners(start, end) {
   return [{ x: left, y: top }, { x: right, y: top }, { x: right, y: bottom }, { x: left, y: bottom }];
 }
 
+// src/adjustments.ts
+var DEFAULT_ADJUSTMENTS = Object.freeze({
+  exposure: 0,
+  brightness: 0,
+  contrast: 0,
+  saturation: 0,
+  warmth: 0,
+  sharpen: 0
+});
+var ADJUSTMENT_LIMITS = {
+  exposure: [-3, 3],
+  brightness: [-100, 100],
+  contrast: [-100, 100],
+  saturation: [-100, 100],
+  warmth: [-100, 100],
+  sharpen: [0, 100]
+};
+var ADJUSTMENT_NAMES = Object.keys(ADJUSTMENT_LIMITS);
+var SRGB_TO_LINEAR = Float32Array.from({ length: 256 }, (_, value) => {
+  const channel = value / 255;
+  return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+});
+function hasAdjustments(input) {
+  return ADJUSTMENT_NAMES.some((name) => input[name] !== 0);
+}
+
+// src/backup-dialog.ts
+var import_obsidian = require("obsidian");
+
+// src/settings.ts
+var DEFAULT_SETTINGS = {
+  quality: 85,
+  backupEnabled: false,
+  backupConfigured: false,
+  backupFolder: "Image Toolkit Backups"
+};
+function loadSettings(saved) {
+  const record = typeof saved === "object" && saved !== null && !Array.isArray(saved) ? saved : {};
+  const hasConfigurationMarker = typeof record.backupConfigured === "boolean";
+  return {
+    quality: typeof record.quality === "number" && Number.isFinite(record.quality) ? Math.max(10, Math.min(100, record.quality)) : DEFAULT_SETTINGS.quality,
+    backupEnabled: hasConfigurationMarker && typeof record.backupEnabled === "boolean" ? record.backupEnabled : false,
+    backupConfigured: hasConfigurationMarker ? record.backupConfigured : false,
+    backupFolder: typeof record.backupFolder === "string" ? record.backupFolder : DEFAULT_SETTINGS.backupFolder
+  };
+}
+
+// src/backup-dialog.ts
+var BackupPrompt = class extends import_obsidian.Modal {
+  constructor(app, current, onResult) {
+    super(app);
+    this.current = current;
+    this.result = null;
+    this.completed = false;
+    this.submitting = false;
+    this.onResult = onResult;
+  }
+  onOpen() {
+    this.modalEl.addClass("image-toolkit-backup-prompt");
+    this.titleEl.setText("Back up images before saving?");
+    this.contentEl.empty();
+    const form = this.contentEl.createEl("form", { cls: "image-toolkit-backup-prompt-form" });
+    const backupLabel = form.createEl("label", { cls: "image-toolkit-backup-prompt-option" });
+    const backupCheckbox = backupLabel.createEl("input", { type: "checkbox" });
+    backupCheckbox.checked = this.current.backupEnabled === true;
+    backupLabel.createSpan({ text: "Back up before overwriting" });
+    const folderLabel = form.createEl("label", { cls: "image-toolkit-backup-prompt-folder" });
+    folderLabel.createSpan({ text: "Backup folder" });
+    const folderInput = folderLabel.createEl("input", {
+      type: "text",
+      value: this.current.backupFolder,
+      attr: { "aria-label": "Backup folder" }
+    });
+    folderInput.disabled = !backupCheckbox.checked;
+    const warning = form.createEl("p", { cls: "image-toolkit-backup-prompt-warning" });
+    warning.setText("Saving will replace the source image. Your decision will be remembered.");
+    const validationError = form.createEl("p", {
+      cls: "image-toolkit-backup-prompt-error",
+      attr: { role: "alert" }
+    });
+    validationError.hidden = true;
+    const actions = form.createDiv("image-toolkit-backup-prompt-actions");
+    const cancel = actions.createEl("button", { text: "Cancel", attr: { type: "button" } });
+    const submit = actions.createEl("button", { text: "Continue & save", attr: { type: "submit" } });
+    submit.addClass("mod-cta");
+    backupCheckbox.addEventListener("change", () => {
+      folderInput.disabled = !backupCheckbox.checked;
+      validationError.hidden = true;
+      validationError.setText("");
+    });
+    folderInput.addEventListener("input", () => {
+      validationError.hidden = true;
+      validationError.setText("");
+    });
+    cancel.addEventListener("click", () => this.close());
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      this.submitChoice(backupCheckbox, folderInput, validationError);
+    });
+  }
+  onClose() {
+    this.finish(this.result);
+  }
+  submitChoice(backupCheckbox, folderInput, validationError) {
+    if (this.completed || this.submitting) return;
+    this.submitting = true;
+    validationError.hidden = true;
+    let choice;
+    try {
+      const backupEnabled = backupCheckbox.checked;
+      const enteredFolder = folderInput.value;
+      const backupFolder = backupEnabled ? normalizeBackupFolder(enteredFolder) : enteredFolder.trim().length > 0 ? enteredFolder : DEFAULT_SETTINGS.backupFolder;
+      choice = { backupEnabled, backupFolder };
+    } catch (error) {
+      this.submitting = false;
+      validationError.setText(error instanceof Error ? error.message : String(error));
+      validationError.hidden = false;
+      return;
+    }
+    this.result = choice;
+    this.close();
+  }
+  finish(result) {
+    if (this.completed) return;
+    this.completed = true;
+    this.onResult(result);
+  }
+};
+
+// src/annotations.ts
+var CORNERS = ["nw", "ne", "se", "sw"];
+function markBounds(mark, measureText) {
+  if (mark.kind === "text") {
+    const point = mark.points[0] ?? { x: 0, y: 0 };
+    const fontSize = mark.width;
+    return {
+      x: point.x,
+      y: point.y,
+      w: measureText(mark.text ?? "", fontSize) * (mark.textScaleX ?? 1),
+      h: fontSize * 1.2
+    };
+  }
+  if (mark.points.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
+  let left = mark.points[0].x;
+  let top = mark.points[0].y;
+  let right = left;
+  let bottom = top;
+  for (const point of mark.points.slice(1)) {
+    left = Math.min(left, point.x);
+    top = Math.min(top, point.y);
+    right = Math.max(right, point.x);
+    bottom = Math.max(bottom, point.y);
+  }
+  return { x: left, y: top, w: right - left, h: bottom - top };
+}
+function moveMark(mark, dx, dy) {
+  return {
+    ...mark,
+    points: mark.points.map((point) => ({ x: point.x + dx, y: point.y + dy }))
+  };
+}
+function resizeBounds(bounds, corner, point, minSize = 2) {
+  const minimum = Number.isFinite(minSize) ? Math.max(0, minSize) : 2;
+  const left = bounds.x;
+  const top = bounds.y;
+  const right = bounds.x + bounds.w;
+  const bottom = bounds.y + bounds.h;
+  const px = Number.isFinite(point.x) ? point.x : left;
+  const py = Number.isFinite(point.y) ? point.y : top;
+  switch (corner) {
+    case "nw": {
+      const x = Math.min(px, right - minimum);
+      const y = Math.min(py, bottom - minimum);
+      return { x, y, w: right - x, h: bottom - y };
+    }
+    case "ne": {
+      const x = Math.max(px, left + minimum);
+      const y = Math.min(py, bottom - minimum);
+      return { x: left, y, w: x - left, h: bottom - y };
+    }
+    case "se": {
+      const x = Math.max(px, left + minimum);
+      const y = Math.max(py, top + minimum);
+      return { x: left, y: top, w: x - left, h: y - top };
+    }
+    case "sw": {
+      const x = Math.min(px, right - minimum);
+      const y = Math.max(py, top + minimum);
+      return { x, y: top, w: right - x, h: y - top };
+    }
+  }
+}
+function scaleCoordinate(value, fromStart, fromSize, toStart, toSize) {
+  const fraction = fromSize === 0 ? 0 : (value - fromStart) / fromSize;
+  return toStart + fraction * toSize;
+}
+function scaleRatio(toSize, fromSize) {
+  return fromSize === 0 ? 1 : toSize / fromSize;
+}
+function resizeMark(mark, from, to) {
+  const points = mark.points.map((point) => ({
+    x: scaleCoordinate(point.x, from.x, from.w, to.x, to.w),
+    y: scaleCoordinate(point.y, from.y, from.h, to.y, to.h)
+  }));
+  if (mark.kind !== "text") return { ...mark, points };
+  const heightScale = scaleRatio(to.h, from.h);
+  const widthScale = scaleRatio(to.w, from.w);
+  const textScaleX = (mark.textScaleX ?? 1) * scaleRatio(widthScale, heightScale);
+  return { ...mark, points, width: mark.width * heightScale, textScaleX };
+}
+function distanceToSegment(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return Math.hypot(point.x - start.x, point.y - start.y);
+  const projection = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared));
+  return Math.hypot(point.x - (start.x + projection * dx), point.y - (start.y + projection * dy));
+}
+function distanceToPath(point, points) {
+  if (points.length === 0) return Number.POSITIVE_INFINITY;
+  if (points.length === 1) return Math.hypot(point.x - points[0].x, point.y - points[0].y);
+  let distance = Number.POSITIVE_INFINITY;
+  for (let index = 1; index < points.length; index++) {
+    distance = Math.min(distance, distanceToSegment(point, points[index - 1], points[index]));
+  }
+  return distance;
+}
+function distanceToEllipse(point, first, last) {
+  const centerX = (first.x + last.x) / 2;
+  const centerY = (first.y + last.y) / 2;
+  const radiusX = Math.abs(last.x - first.x) / 2;
+  const radiusY = Math.abs(last.y - first.y) / 2;
+  const dx = Math.abs(point.x - centerX);
+  const dy = Math.abs(point.y - centerY);
+  if (radiusX === 0 && radiusY === 0) return Math.hypot(dx, dy);
+  if (radiusX === 0) return distanceToSegment(point, { x: centerX, y: centerY - radiusY }, { x: centerX, y: centerY + radiusY });
+  if (radiusY === 0) return distanceToSegment(point, { x: centerX - radiusX, y: centerY }, { x: centerX + radiusX, y: centerY });
+  const distanceSquaredAt = (angle) => {
+    const x = radiusX * Math.cos(angle) - dx;
+    const y = radiusY * Math.sin(angle) - dy;
+    return x * x + y * y;
+  };
+  const derivative = (angle) => {
+    const sin = Math.sin(angle);
+    const cos = Math.cos(angle);
+    return (radiusY * radiusY - radiusX * radiusX) * sin * cos + radiusX * dx * sin - radiusY * dy * cos;
+  };
+  const end = Math.PI / 2;
+  const samples = 128;
+  let bestSquared = Math.min(distanceSquaredAt(0), distanceSquaredAt(end));
+  let previousAngle = 0;
+  let previousDerivative = derivative(previousAngle);
+  for (let index = 1; index <= samples; index++) {
+    const angle = end * index / samples;
+    const currentDerivative = derivative(angle);
+    bestSquared = Math.min(bestSquared, distanceSquaredAt(angle));
+    if (previousDerivative === 0) bestSquared = Math.min(bestSquared, distanceSquaredAt(previousAngle));
+    if (previousDerivative < 0 && currentDerivative > 0 || previousDerivative > 0 && currentDerivative < 0) {
+      let low = previousAngle;
+      let high = angle;
+      let lowDerivative = previousDerivative;
+      for (let iteration = 0; iteration < 48; iteration++) {
+        const middle = (low + high) / 2;
+        const middleDerivative = derivative(middle);
+        if (middleDerivative === 0) {
+          low = middle;
+          high = middle;
+          break;
+        }
+        if (lowDerivative < 0 && middleDerivative > 0 || lowDerivative > 0 && middleDerivative < 0) {
+          high = middle;
+        } else {
+          low = middle;
+          lowDerivative = middleDerivative;
+        }
+      }
+      bestSquared = Math.min(bestSquared, distanceSquaredAt((low + high) / 2));
+    }
+    previousAngle = angle;
+    previousDerivative = currentDerivative;
+  }
+  return Math.sqrt(bestSquared);
+}
+function distanceToRectangle(point, first, last) {
+  const left = Math.min(first.x, last.x);
+  const right = Math.max(first.x, last.x);
+  const top = Math.min(first.y, last.y);
+  const bottom = Math.max(first.y, last.y);
+  const corners = [
+    { x: left, y: top },
+    { x: right, y: top },
+    { x: right, y: bottom },
+    { x: left, y: bottom }
+  ];
+  return Math.min(...corners.map((corner, index) => distanceToSegment(point, corner, corners[(index + 1) % corners.length])));
+}
+function hitTestMark(mark, point, tolerance, measureText) {
+  if (mark.points.length === 0 || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
+  if (mark.kind === "text") {
+    const bounds = markBounds(mark, measureText);
+    return point.x >= bounds.x && point.x <= bounds.x + bounds.w && point.y >= bounds.y && point.y <= bounds.y + bounds.h;
+  }
+  const strokeWidth = Number.isFinite(mark.width) ? Math.abs(mark.width) : 0;
+  const hitRadius = Math.max(0, Number.isFinite(tolerance) ? tolerance : 0) + strokeWidth * (mark.kind === "highlighter" ? 3 : 1) / 2;
+  let distance;
+  if (mark.kind === "rectangle") {
+    distance = distanceToRectangle(point, mark.points[0], mark.points[mark.points.length - 1]);
+  } else if (mark.kind === "ellipse") {
+    distance = distanceToEllipse(point, mark.points[0], mark.points[mark.points.length - 1]);
+  } else {
+    distance = distanceToPath(point, mark.points);
+    if (mark.kind === "arrow" && mark.points.length >= 2) {
+      const start = mark.points[0];
+      const end = mark.points[mark.points.length - 1];
+      const angle = Math.atan2(end.y - start.y, end.x - start.x);
+      const length = Math.max(12, strokeWidth * 4);
+      const first = { x: end.x - length * Math.cos(angle - 0.5), y: end.y - length * Math.sin(angle - 0.5) };
+      const second = { x: end.x - length * Math.cos(angle + 0.5), y: end.y - length * Math.sin(angle + 0.5) };
+      distance = Math.min(distance, distanceToSegment(point, first, end), distanceToSegment(point, end, second));
+    }
+  }
+  return distance <= hitRadius;
+}
+function selectionHandles(mark, bounds) {
+  if (mark.kind === "arrow") {
+    if (mark.points.length === 0) return [];
+    return [
+      { id: "start", point: { ...mark.points[0] } },
+      { id: "end", point: { ...mark.points[mark.points.length - 1] } }
+    ];
+  }
+  const points = {
+    nw: { x: bounds.x, y: bounds.y },
+    ne: { x: bounds.x + bounds.w, y: bounds.y },
+    se: { x: bounds.x + bounds.w, y: bounds.y + bounds.h },
+    sw: { x: bounds.x, y: bounds.y + bounds.h }
+  };
+  return CORNERS.map((id) => ({ id, point: points[id] }));
+}
+
 // src/editor.ts
 var clone = (value) => JSON.parse(JSON.stringify(value));
 var clamp = (n, low, high) => Math.max(low, Math.min(high, n));
@@ -296,7 +636,7 @@ async function decode(blob) {
     URL.revokeObjectURL(url);
   }
 }
-var ImageEditor = class extends import_obsidian.Modal {
+var ImageEditor = class extends import_obsidian2.Modal {
   constructor(app, file, options, didClose) {
     super(app);
     this.file = file;
@@ -317,6 +657,7 @@ var ImageEditor = class extends import_obsidian.Modal {
     this.historyIndex = -1;
     this.busy = false;
     this.closed = false;
+    this.adjustments = { ...DEFAULT_ADJUSTMENTS };
     this.zoom = 100;
     this.workerSequence = 0;
     this.jobs = /* @__PURE__ */ new Map();
@@ -328,6 +669,11 @@ var ImageEditor = class extends import_obsidian.Modal {
     this.boardWidth = 0;
     this.boardHeight = 0;
     this.childModals = /* @__PURE__ */ new Set();
+    this.measureText = (text, fontSize) => {
+      const context = ctx(this.working);
+      context.font = `${fontSize}px sans-serif`;
+      return context.measureText(text).width;
+    };
     this.tool = options.tool;
     this.quality = clamp(Number(options.quality) || 85, 10, 100);
     this.format = file.extension.toLowerCase() === "jpeg" ? "jpg" : file.extension.toLowerCase();
@@ -335,6 +681,8 @@ var ImageEditor = class extends import_obsidian.Modal {
   async onOpen() {
     this.modalEl.addClass("image-toolkit-modal");
     this.titleEl.setText(`Image Toolkit \u2014 ${this.file.name}`);
+    this.titleEl.addClass("image-toolkit-title");
+    this.titleEl.title = this.file.path;
     this.contentEl.createEl("p", { text: "Loading image\u2026" });
     try {
       this.original = await this.app.vault.readBinary(this.file);
@@ -379,7 +727,7 @@ var ImageEditor = class extends import_obsidian.Modal {
       await action();
     } catch (e) {
       if (!this.closed) {
-        new import_obsidian.Notice(String(e));
+        new import_obsidian2.Notice(String(e));
         this.status?.setText(String(e));
       }
     }
@@ -405,18 +753,19 @@ var ImageEditor = class extends import_obsidian.Modal {
   build() {
     this.contentEl.empty();
     const toolbar = this.contentEl.createDiv("image-toolkit-toolbar");
-    for (const [id, title] of [["compress", "Compress"], ["resize", "Resize"], ["crop", "Crop / board"], ["annotate", "Annotate"]]) {
-      const b = this.button(toolbar, title, () => {
-        this.tool = id;
-        this.selected = -1;
-        this.renderControls();
-        this.draw();
-      });
+    const tabs = toolbar.createDiv("image-toolkit-tool-tabs");
+    for (const [id, title] of [["compress", "Compress"], ["resize", "Resize"], ["crop", "Crop / board"], ["adjust", "Adjust"], ["annotate", "Annotate"]]) {
+      const b = this.button(tabs, title, () => this.selectTool(id));
       b.dataset.tool = id;
     }
-    this.button(toolbar, "Undo", () => this.restore(-1));
-    this.button(toolbar, "Redo", () => this.restore(1));
-    this.button(toolbar, "Reset", () => this.exclusive(async () => {
+    const history = toolbar.createDiv("image-toolkit-history");
+    this.button(history, "Undo", () => this.restore(-1));
+    this.button(history, "Redo", () => this.restore(1));
+    this.button(history, "Reset", () => this.exclusive(async () => {
+      this.adjustments = { ...DEFAULT_ADJUSTMENTS };
+      ++this.sizeVersion;
+      window.clearTimeout(this.estimateTimer);
+      this.invalidateEncodedPreview();
       this.working = await decode(new Blob([this.original]));
       this.marks = [];
       this.resetCorners();
@@ -425,14 +774,15 @@ var ImageEditor = class extends import_obsidian.Modal {
       this.draw();
       this.refreshOutputSize();
     }));
-    const layout = this.contentEl.createDiv("image-toolkit-layout");
-    const viewport = layout.createDiv("image-toolkit-viewport");
+    this.button(history, "Compare", () => this.compare()).title = "Before / after with the current quality";
+    this.layout = this.contentEl.createDiv("image-toolkit-layout");
+    const viewport = this.layout.createDiv("image-toolkit-viewport");
     const zoomBar = viewport.createDiv("image-toolkit-zoom");
-    this.range(zoomBar, "Zoom (100% = fit)", 25, 300, this.zoom, 5, (value) => {
+    this.range(zoomBar, "Zoom", 25, 300, this.zoom, 5, (value) => {
       this.zoom = value;
       this.draw();
-    });
-    this.previewCaption = viewport.createDiv("image-toolkit-preview-caption");
+    }).title = "100% fits both dimensions; scroll to pan above 100%";
+    this.previewCaption = zoomBar.createDiv("image-toolkit-preview-caption");
     this.scroll = viewport.createDiv("image-toolkit-scroll");
     const stage = this.scroll.createDiv("image-toolkit-stage");
     this.preview = stage.createEl("canvas", { attr: { tabindex: "0", "aria-label": "Image editing canvas. Drag crop handles; arrow keys nudge the selected corner." } });
@@ -460,14 +810,25 @@ var ImageEditor = class extends import_obsidian.Modal {
         this.scheduleBoardPreview();
       }
     });
-    this.controls = layout.createDiv("image-toolkit-controls");
-    this.status = this.contentEl.createDiv("image-toolkit-status");
-    this.status.setAttribute("role", "status");
-    this.status.setText(`Original: ${this.working.width} \xD7 ${this.working.height} \xB7 ${this.bytes(this.original.byteLength)}. Crop / resize controls require Apply before saving.`);
+    const sidebar = this.layout.createDiv("image-toolkit-sidebar");
+    this.controls = sidebar.createDiv("image-toolkit-controls");
+    this.toolActions = sidebar.createDiv("image-toolkit-tool-actions");
     const footer = this.contentEl.createDiv("image-toolkit-footer");
-    this.outputInfo = footer.createSpan();
-    this.button(footer, "Cancel", () => this.close());
-    this.button(footer, "Save image", () => this.save(), true);
+    const exportInfo = footer.createDiv("image-toolkit-export-info");
+    const exportBar = exportInfo.createDiv("image-toolkit-export-bar");
+    exportBar.createSpan({ text: this.format.toUpperCase(), cls: "image-toolkit-format" }).title = `Original format preserved: ${this.file.path}`;
+    if (this.format !== "png") this.range(exportBar, "Quality", 10, 100, this.quality, 1, (value) => {
+      this.quality = value;
+      this.refreshOutputSize();
+    }).title = "Encoded preview updates after 300 ms";
+    this.outputInfo = exportBar.createSpan({ cls: "image-toolkit-output-info" });
+    this.status = exportInfo.createDiv("image-toolkit-status");
+    this.status.setAttribute("role", "status");
+    this.status.setText(`Original ${this.bytes(this.original.byteLength)} \xB7 replaces original \xB7 backup ${this.options.backupEnabled ? "on" : "off"}`);
+    this.status.title = `Apply crop/resize before saving. Pending photo adjustments are included automatically. All notes using this image are affected. ${this.options.backupEnabled ? `Backups: ${this.options.backupFolder}` : "Backups disabled in plugin settings."}`;
+    const saveActions = footer.createDiv("image-toolkit-save-actions");
+    this.button(saveActions, "Cancel", () => this.close());
+    this.button(saveActions, "Save image", () => this.save(), true).title = `Replace ${this.file.path}. ${this.options.backupEnabled ? `Back up to ${this.options.backupFolder} first.` : "Backups are disabled."}`;
     this.resizeObserver?.disconnect();
     this.resizeObserver = new ResizeObserver(() => this.draw());
     this.resizeObserver.observe(this.scroll);
@@ -486,11 +847,12 @@ var ImageEditor = class extends import_obsidian.Modal {
     return input;
   }
   range(parent, text, min, max, value, step, change) {
-    const label = this.label(parent, `${text}: ${value}`);
+    const suffix = text === "Zoom" ? "%" : "";
+    const label = this.label(parent, `${text}: ${value}${suffix}`);
     const title = label.firstChild;
     const input = label.createEl("input", { type: "range", value: String(value), attr: { min: String(min), max: String(max), step: String(step) } });
     input.addEventListener("input", () => {
-      title.textContent = `${text}: ${input.value}`;
+      title.textContent = `${text}: ${input.value}${suffix}`;
       change(Number(input.value));
     });
     return input;
@@ -509,31 +871,75 @@ var ImageEditor = class extends import_obsidian.Modal {
     select.addEventListener("change", () => change(select.value));
     return select;
   }
+  details(parent, title, open = false) {
+    const details = parent.createEl("details", { cls: "image-toolkit-details" });
+    details.open = open;
+    details.createEl("summary", { text: title });
+    return details.createDiv();
+  }
   renderControls() {
     if (!this.controls) return;
     this.controls.empty();
+    this.controls.removeAttribute("title");
+    this.toolActions.empty();
     this.boardPreview = void 0;
     this.magnifier = void 0;
-    this.contentEl.querySelectorAll("[data-tool]").forEach((el) => el.toggleClass("is-active", el.dataset.tool === this.tool));
-    if (this.tool === "compress") {
-      this.controls.createEl("h3", { text: "Compression / export" });
-      this.controls.createEl("p", { text: "Quality changes update the actual encoded preview after 300 ms. JPEG/WebP quality affects output size; PNG remains lossless. Saving preserves the original format and replaces the same file. Metadata is not retained." });
-      this.button(this.controls, "Before / after", () => this.compare());
-    }
+    this.layout.toggleClass("image-toolkit-image-only", this.tool === "compress");
+    this.contentEl.querySelectorAll("[data-tool]").forEach((el) => {
+      el.toggleClass("is-active", el.dataset.tool === this.tool);
+      el.setAttribute("aria-pressed", String(el.dataset.tool === this.tool));
+    });
     if (this.tool === "resize") this.resizeControls();
     if (this.tool === "crop") this.cropControls();
     if (this.tool === "annotate") this.annotationControls();
-    this.controls.createEl("hr");
-    this.controls.createEl("h3", { text: "Save" });
-    this.controls.createEl("p", { text: `Format: ${this.format.toUpperCase()} (preserved). Save replaces ${this.file.path} for every note using it.`, cls: "image-toolkit-hint" });
-    if (this.format !== "png") this.range(this.controls, "Quality", 10, 100, this.quality, 1, (v) => {
-      this.quality = v;
+    if (this.tool === "adjust") this.adjustmentControls();
+    if (this.busy) this.setEnabled(false);
+  }
+  async selectTool(tool) {
+    if (tool !== this.tool && hasAdjustments(this.adjustments)) await this.applyAdjustments();
+    if (this.closed || this.busy) return;
+    this.tool = tool;
+    this.selected = -1;
+    this.renderControls();
+    this.draw();
+  }
+  adjustmentControls() {
+    const controls = [
+      ["exposure", "Exposure", -3, 3, 0.1, "Exposure in EV (stops)."],
+      ["brightness", "Brightness", -100, 100, 1, "Lift or darken overall brightness."],
+      ["contrast", "Contrast", -100, 100, 1, "Increase or soften midtone contrast."],
+      ["saturation", "Saturation", -100, 100, 1, "-100 removes color; 0 preserves it."],
+      ["warmth", "Warmth", -100, 100, 1, "Cooler blues to warmer reds."],
+      ["sharpen", "Sharpen", 0, 100, 1, "Strengthen fine edges. Cannot recover lost focus."]
+    ];
+    for (const [key, label, min, max, step, help] of controls) {
+      const input = this.range(this.controls, label, min, max, this.adjustments[key], step, (value) => {
+        this.adjustments = { ...this.adjustments, [key]: value };
+        this.refreshOutputSize();
+      });
+      input.dataset.adjustment = key;
+      input.title = help;
+    }
+    this.controls.createDiv({ text: "Live preview \xB7 undoable on Apply", cls: "image-toolkit-hint" }).title = "Apply commits one history step. Switching tools or saving also applies pending adjustments. Undo first clears an unapplied preview.";
+    const actions = this.toolActions.createDiv("image-toolkit-adjustment-actions");
+    this.button(actions, "Reset sliders", () => {
+      this.adjustments = { ...DEFAULT_ADJUSTMENTS };
+      this.renderControls();
       this.refreshOutputSize();
     });
-    this.controls.createEl("p", { text: this.options.backupEnabled ? `A backup is saved to ${this.options.backupFolder} before every overwrite.` : "Backups are disabled in Image Toolkit settings. Saving permanently replaces the image.", cls: "image-toolkit-hint" });
+    this.button(actions, "Apply", () => this.applyAdjustments(), true).setAttribute("aria-label", "Apply adjustments");
+  }
+  applyAdjustments() {
+    return this.exclusive(() => this.applyAdjustmentRaster());
+  }
+  async applyAdjustmentRaster() {
+    if (!hasAdjustments(this.adjustments)) return;
+    this.status.setText("Applying adjustments\u2026");
+    const out = await this.adjustedRaster();
+    if (this.closed) return;
+    await this.replaceRaster(out);
   }
   resizeControls() {
-    this.controls.createEl("h3", { text: "Resize" });
     let width = this.working.width, height = this.working.height, lock = true, upscale = false;
     const ratio = width / height;
     let wi, hi;
@@ -563,7 +969,7 @@ var ImageEditor = class extends import_obsidian.Modal {
     this.check(this.controls, "Allow enlargement", upscale, (v) => {
       upscale = v;
     });
-    this.button(this.controls, "Apply resize", () => this.exclusive(async () => {
+    this.button(this.toolActions, "Apply resize", () => this.exclusive(async () => {
       width = Number(wi.value);
       height = Number(hi.value);
       if (!Number.isInteger(width) || !Number.isInteger(height)) throw new Error("Use whole-pixel dimensions.");
@@ -576,18 +982,13 @@ var ImageEditor = class extends import_obsidian.Modal {
     }), true);
   }
   cropControls() {
-    this.controls.createEl("h3", { text: "Crop / straighten" });
+    let inspectors = this.controls;
     this.select(this.controls, "Mode", { rectangle: "Rectangle crop", board: "Board" }, this.mode, (v) => {
       this.mode = v;
       this.renderControls();
       this.draw();
-    });
-    this.controls.createEl("p", { text: "Drag anywhere away from a corner to draw an initial rectangle. Then drag each corner to match the board perspective. Arrow keys nudge a selected corner (Shift: 10px). Apply before saving." });
-    this.button(this.controls, "Reset corners", () => {
-      this.resetCorners();
-      this.draw();
-      this.scheduleBoardPreview();
-    });
+    }).title = "Drag to draw a rectangle, then refine corners. Arrow keys nudge; Apply commits the crop.";
+    this.controls.createDiv({ text: "Drag to select \xB7 refine corners", cls: "image-toolkit-hint" }).title = "Drag away from a handle to draw a rectangle. Drag handles independently in Board mode. Arrow keys: 1px; Shift+arrow: 10px. Apply before Save.";
     if (this.mode === "rectangle") {
       this.select(this.controls, "Aspect preset", { free: "Free", square: "1:1", landscape: "4:3", wide: "16:9", portrait: "3:4" }, "free", (v) => {
         const ratio = { square: 1, landscape: 4 / 3, wide: 16 / 9, portrait: 3 / 4 }[v];
@@ -601,57 +1002,130 @@ var ImageEditor = class extends import_obsidian.Modal {
         this.corners = [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
         this.draw();
       });
-      this.controls.createEl("small", { text: "Aspect presets initialize a centered crop; dragging remains freeform." });
+      this.controls.title = "Aspect presets start a centered crop; subsequent dragging remains freeform.";
     } else {
-      this.select(this.controls, "Board background", { white: "White \u2014 dark writing", black: "Black \u2014 light writing" }, this.boardBackground, (v) => {
+      const background = this.select(this.controls, "Background", { white: "White", black: "Black" }, this.boardBackground, (v) => {
         this.boardBackground = v;
         this.scheduleBoardPreview();
       });
-      this.range(this.controls, "Enhancement strength", 0, 100, Math.round(this.strength * 100), 1, (v) => {
+      background.setAttribute("aria-label", "Board background");
+      background.title = "White: dark writing. Black: light writing.";
+      this.range(this.controls, "Enhance", 0, 100, Math.round(this.strength * 100), 1, (v) => {
         this.strength = v / 100;
         this.scheduleBoardPreview();
-      });
-      this.number(this.controls, "Output width (0 = automatic)", this.boardWidth, (v) => {
-        this.boardWidth = v;
-        this.scheduleBoardPreview();
-      }, 0);
-      this.number(this.controls, "Output height (0 = automatic)", this.boardHeight, (v) => {
-        this.boardHeight = v;
-        this.scheduleBoardPreview();
-      }, 0);
-      this.controls.createEl("small", { text: "Set either dimension to preserve the estimated ratio, or both to choose an exact rectangle. Preview is reduced-resolution. Enhancement cannot recover glare or blur." });
-      this.boardPreview = this.controls.createEl("canvas", { cls: "image-toolkit-board-preview", attr: { "aria-label": "Rectified board preview" } });
+      }).title = "0 leaves the rectified image unchanged; higher values clean the background and strengthen writing.";
+      inspectors = this.controls.createDiv("image-toolkit-crop-previews");
+      const board = inspectors.createDiv();
+      board.createDiv({ text: "Board preview", cls: "image-toolkit-inspector-label" });
+      this.boardPreview = board.createEl("canvas", { cls: "image-toolkit-board-preview", attr: { "aria-label": "Rectified board preview" } });
       this.scheduleBoardPreview();
     }
-    this.magnifier = this.controls.createEl("canvas", { cls: "image-toolkit-magnifier", attr: { "aria-label": "Selected corner magnifier" } });
+    const precision = this.details(inspectors, "Corner precision", true);
+    this.magnifier = precision.createEl("canvas", { cls: "image-toolkit-magnifier", attr: { "aria-label": "Selected corner magnifier" } });
     this.magnifier.width = 160;
     this.magnifier.height = 120;
-    this.button(this.controls, "Apply crop / board correction", () => this.exclusive(() => this.applyCrop()), true);
-    const transforms = this.controls.createDiv("image-toolkit-transform");
-    this.button(transforms, "Rotate \u21B6", () => this.transform("left"));
-    this.button(transforms, "Rotate \u21B7", () => this.transform("right"));
-    this.button(transforms, "Flip \u2194", () => this.transform("horizontal"));
-    this.button(transforms, "Flip \u2195", () => this.transform("vertical"));
+    if (this.mode === "board") {
+      const output = this.details(this.controls, "Output size");
+      this.number(output, "Width", this.boardWidth, (value) => {
+        this.boardWidth = value;
+        this.scheduleBoardPreview();
+      }, 0).title = "Output pixels; 0 = automatic. Set one dimension to preserve the estimated ratio.";
+      this.number(output, "Height", this.boardHeight, (value) => {
+        this.boardHeight = value;
+        this.scheduleBoardPreview();
+      }, 0).title = "Output pixels; 0 = automatic.";
+    }
+    const cropActions = this.toolActions.createDiv("image-toolkit-crop-actions");
+    this.button(cropActions, "Reset corners", () => {
+      this.resetCorners();
+      this.draw();
+      this.scheduleBoardPreview();
+    });
+    this.button(cropActions, "Apply crop", () => this.exclusive(() => this.applyCrop()), true).setAttribute("aria-label", "Apply crop / board correction");
+    const transforms = this.toolActions.createDiv("image-toolkit-transform");
+    const actions = [["\u21B6", "left", "Rotate left 90\xB0"], ["\u21B7", "right", "Rotate right 90\xB0"], ["\u2194", "horizontal", "Flip horizontally"], ["\u2195", "vertical", "Flip vertically"]];
+    for (const [icon, kind, label] of actions) {
+      const button = this.button(transforms, icon, () => this.transform(kind));
+      button.title = label;
+      button.setAttribute("aria-label", label);
+    }
   }
   annotationControls() {
-    this.controls.createEl("h3", { text: "Annotations" });
-    this.select(this.controls, "Tool", { pen: "Pen", highlighter: "Highlighter", arrow: "Arrow", rectangle: "Rectangle", ellipse: "Ellipse", text: "Text", select: "Select / move" }, this.markTool, (v) => {
-      this.markTool = v;
-      this.selected = -1;
-      this.draw();
-    });
-    const color = this.label(this.controls, "Color").createEl("input", { type: "color", value: this.color });
+    const tools = this.controls.createDiv("image-toolkit-annotation-tools");
+    tools.setAttribute("role", "group");
+    tools.setAttribute("aria-label", "Annotation tools");
+    const choices = [["select", "mouse-pointer-2", "Select / move"], ["pen", "pencil", "Pen"], ["highlighter", "highlighter", "Highlighter"], ["arrow", "move-up-right", "Arrow"], ["rectangle", "square", "Rectangle"], ["ellipse", "circle", "Ellipse"], ["text", "type", "Text"]];
+    for (const [kind, icon, label] of choices) {
+      const button = this.button(tools, "", () => {
+        this.markTool = kind;
+        this.selected = -1;
+        this.renderControls();
+        this.draw();
+      });
+      (0, import_obsidian2.setIcon)(button, icon);
+      button.dataset.annotationTool = kind;
+      button.title = label;
+      button.setAttribute("aria-label", label);
+      button.setAttribute("aria-pressed", String(this.markTool === kind));
+      button.toggleClass("is-active", this.markTool === kind);
+    }
+    const mark = this.markTool === "select" ? this.marks[this.selected] : void 0;
+    const changed = () => {
+      if (mark) this.refreshOutputSize();
+    };
+    const commit = () => {
+      if (mark) void this.run(() => this.exclusive(async () => {
+        await this.checkpoint();
+        this.refreshOutputSize();
+      }));
+    };
+    const color = this.label(this.controls, "Color").createEl("input", { type: "color", value: mark?.color || this.color });
     color.addEventListener("input", () => {
       this.color = color.value;
+      if (mark) mark.color = color.value;
+      changed();
     });
-    this.range(this.controls, "Stroke width", 1, 40, this.lineWidth, 1, (v) => {
-      this.lineWidth = v;
+    color.addEventListener("change", commit);
+    if (mark?.kind === "text" || this.markTool === "text") {
+      const size = mark?.kind === "text" ? mark.width : this.fontSize;
+      const input = this.range(this.controls, "Text size", 10, Math.max(256, Math.ceil(size)), size, 1, (value) => {
+        this.fontSize = value;
+        if (mark?.kind === "text") mark.width = value;
+        changed();
+      });
+      input.addEventListener("change", commit);
+    } else {
+      const width = mark?.width || this.lineWidth;
+      const input = this.range(this.controls, "Stroke width", 1, Math.max(40, Math.ceil(width)), width, 1, (value) => {
+        this.lineWidth = value;
+        if (mark) mark.width = value;
+        changed();
+      });
+      input.addEventListener("change", commit);
+    }
+    this.controls.createDiv({ text: this.markTool === "select" ? "Drag to move \xB7 handles to reshape" : "Drag to draw \xB7 click for text", cls: "image-toolkit-hint" }).title = "Select a mark to move, resize or change its style. Arrows have endpoint handles. Text can also be edited. Delete removes the selection.";
+    if (mark?.kind === "text") this.button(this.toolActions, "Edit text", () => this.editSelectedText());
+    this.button(this.toolActions, "Delete selected", () => this.removeSelected());
+  }
+  async editSelectedText() {
+    const index = this.selected, mark = this.marks[index];
+    if (mark?.kind !== "text") return;
+    const text = await this.askText(mark.text || "");
+    if (!text || this.closed || this.marks[index] !== mark) return;
+    await this.exclusive(async () => {
+      mark.text = text;
+      await this.checkpoint();
+      this.renderControls();
+      this.refreshOutputSize();
     });
-    this.range(this.controls, "Text size", 10, 120, this.fontSize, 1, (v) => {
-      this.fontSize = v;
-    });
-    this.controls.createEl("p", { text: "Drag to draw. Text prompts on click. Select / move: click an object, drag to move it, Delete to remove it. Raster operations flatten annotations; Undo restores them." });
-    this.button(this.controls, "Delete selected", () => this.removeSelected());
+  }
+  selectionHandle(point) {
+    const mark = this.marks[this.selected];
+    if (!mark) return void 0;
+    const radius = 12 * this.working.width / this.preview.getBoundingClientRect().width;
+    const handles = selectionHandles(mark, this.bounds(mark));
+    const closest = handles.reduce((best, handle) => !best || Math.hypot(handle.point.x - point.x, handle.point.y - point.y) < Math.hypot(best.point.x - point.x, best.point.y - point.y) ? handle : best, void 0);
+    return closest && Math.hypot(closest.point.x - point.x, closest.point.y - point.y) <= radius ? closest : void 0;
   }
   resetCorners() {
     const w = this.working.width - 1, h = this.working.height - 1;
@@ -699,15 +1173,28 @@ var ImageEditor = class extends import_obsidian.Modal {
     window.clearTimeout(this.estimateTimer);
     this.invalidateEncodedPreview();
     if (this.markTool === "select") {
+      const handle = this.selectionHandle(p);
+      if (handle) {
+        const mark2 = this.marks[this.selected];
+        this.dragging = { mark: this.selected, point: p, handle: handle.id, originalMark: clone(mark2), bounds: this.bounds(mark2) };
+        this.draw();
+        return;
+      }
+      const previous = this.selected;
       this.selected = -1;
+      const tolerance = 8 * this.working.width / this.preview.getBoundingClientRect().width;
       for (let i = this.marks.length - 1; i >= 0; i--) {
-        const b = this.bounds(this.marks[i]), pad = 10 * this.working.width / this.preview.getBoundingClientRect().width;
-        if (p.x >= b.x - pad && p.x <= b.x + b.w + pad && p.y >= b.y - pad && p.y <= b.y + b.h + pad) {
+        if (hitTestMark(this.marks[i], p, tolerance, this.measureText)) {
           this.selected = i;
           break;
         }
       }
-      if (this.selected >= 0) this.dragging = { mark: this.selected, point: p, originalPoints: clone(this.marks[this.selected].points) };
+      if (this.selected < 0 && this.marks[previous]) {
+        const bounds = this.bounds(this.marks[previous]);
+        if (p.x >= bounds.x && p.x <= bounds.x + bounds.w && p.y >= bounds.y && p.y <= bounds.y + bounds.h) this.selected = previous;
+      }
+      if (this.selected >= 0) this.dragging = { mark: this.selected, point: p, originalMark: clone(this.marks[this.selected]) };
+      this.renderControls();
       this.draw();
       return;
     }
@@ -715,6 +1202,7 @@ var ImageEditor = class extends import_obsidian.Modal {
       this.askText().then((text) => {
         if (text && !this.closed) {
           this.marks.push({ kind: "text", points: [p], text, color: this.color, width: this.fontSize });
+          this.selected = this.marks.length - 1;
           this.draw();
           void this.run(() => this.exclusive(async () => {
             await this.checkpoint();
@@ -731,8 +1219,13 @@ var ImageEditor = class extends import_obsidian.Modal {
     this.draw();
   }
   pointerMove(e) {
-    if (!this.dragging || this.busy) return;
+    if (this.busy) return;
     const p = this.position(e), d = this.dragging;
+    if (!d) {
+      const handle = this.tool === "annotate" && this.markTool === "select" ? this.selectionHandle(p) : void 0;
+      this.preview.style.cursor = handle ? handle.id === "nw" || handle.id === "se" ? "nwse-resize" : handle.id === "ne" || handle.id === "sw" ? "nesw-resize" : "crosshair" : this.tool === "annotate" && this.markTool === "select" ? "move" : "crosshair";
+      return;
+    }
     if (d.corner !== void 0) {
       if (d.rectangle) this.corners = rectangleCorners(d.point, p);
       else {
@@ -748,9 +1241,13 @@ var ImageEditor = class extends import_obsidian.Modal {
       if (d.drawing) {
         if (mark.kind === "pen" || mark.kind === "highlighter") mark.points.push(p);
         else mark.points[1] = p;
-      } else if (d.originalPoints) {
-        const dx = p.x - d.point.x, dy = p.y - d.point.y;
-        mark.points = d.originalPoints.map((v) => ({ x: v.x + dx, y: v.y + dy }));
+      } else if (d.originalMark) {
+        if (d.handle === "start" || d.handle === "end") {
+          const reshaped = clone(d.originalMark);
+          reshaped.points[d.handle === "start" ? 0 : reshaped.points.length - 1] = p;
+          this.marks[d.mark] = reshaped;
+        } else if (d.handle && d.bounds) this.marks[d.mark] = resizeMark(d.originalMark, d.bounds, resizeBounds(d.bounds, d.handle, p));
+        else this.marks[d.mark] = moveMark(d.originalMark, p.x - d.point.x, p.y - d.point.y);
       }
       this.draw();
     }
@@ -760,6 +1257,7 @@ var ImageEditor = class extends import_obsidian.Modal {
     this.dragging = void 0;
     if (annotation) void this.run(() => this.exclusive(async () => {
       await this.checkpoint();
+      if (this.markTool === "select") this.renderControls();
       this.refreshOutputSize();
     }));
     else if (this.tool === "annotate") this.refreshOutputSize();
@@ -802,11 +1300,20 @@ var ImageEditor = class extends import_obsidian.Modal {
       this.drawMagnifier();
     }
     if (this.tool === "annotate" && this.selected >= 0 && this.marks[this.selected]) {
-      const b = this.bounds(this.marks[this.selected]);
+      const mark = this.marks[this.selected], b = this.bounds(mark);
       c.strokeStyle = "#00b8ff";
-      c.lineWidth = 2 * unit;
-      c.setLineDash([6 * unit, 4 * unit]);
-      c.strokeRect(b.x - 4 * unit, b.y - 4 * unit, b.w + 8 * unit, b.h + 8 * unit);
+      c.lineWidth = 1.5 * unit;
+      c.setLineDash([5 * unit, 4 * unit]);
+      c.strokeRect(b.x, b.y, b.w, b.h);
+      c.setLineDash([]);
+      if (this.markTool === "select") for (const handle of selectionHandles(mark, b)) {
+        c.beginPath();
+        c.arc(handle.point.x, handle.point.y, 5 * unit, 0, Math.PI * 2);
+        c.fillStyle = "#fff";
+        c.fill();
+        c.strokeStyle = "#0077c8";
+        c.stroke();
+      }
     }
   }
   drawMagnifier() {
@@ -835,9 +1342,11 @@ var ImageEditor = class extends import_obsidian.Modal {
       c.lineJoin = "round";
       const a = mark.points[0], b = mark.points[mark.points.length - 1];
       if (mark.kind === "text") {
+        c.translate(a.x, a.y);
+        c.scale(mark.textScaleX ?? 1, 1);
         c.font = `${mark.width}px sans-serif`;
         c.textBaseline = "top";
-        c.fillText(mark.text || "", a.x, a.y);
+        c.fillText(mark.text || "", 0, 0);
       } else if (mark.kind === "rectangle") {
         c.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
       } else if (mark.kind === "ellipse") {
@@ -865,19 +1374,7 @@ var ImageEditor = class extends import_obsidian.Modal {
     }
   }
   bounds(mark) {
-    if (mark.kind === "text") {
-      const c = ctx(this.working);
-      c.font = `${mark.width}px sans-serif`;
-      return { x: mark.points[0].x, y: mark.points[0].y, w: c.measureText(mark.text || "").width, h: mark.width * 1.2 };
-    }
-    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-    for (const p of mark.points) {
-      left = Math.min(left, p.x);
-      top = Math.min(top, p.y);
-      right = Math.max(right, p.x);
-      bottom = Math.max(bottom, p.y);
-    }
-    return { x: left, y: top, w: right - left, h: bottom - top };
+    return markBounds(mark, this.measureText);
   }
   composite(background) {
     const out = canvas(this.working.width, this.working.height), c = ctx(out);
@@ -895,6 +1392,7 @@ var ImageEditor = class extends import_obsidian.Modal {
       this.marks.splice(this.selected, 1);
       this.selected = -1;
       await this.checkpoint();
+      this.renderControls();
       this.draw();
       this.refreshOutputSize();
     });
@@ -909,6 +1407,12 @@ var ImageEditor = class extends import_obsidian.Modal {
   }
   async restore(delta) {
     await this.exclusive(async () => {
+      if (hasAdjustments(this.adjustments)) {
+        this.adjustments = { ...DEFAULT_ADJUSTMENTS };
+        this.renderControls();
+        this.refreshOutputSize();
+        return;
+      }
       const index = this.historyIndex + delta;
       if (index < 0 || index >= this.history.length) return;
       const state = this.history[index];
@@ -924,14 +1428,18 @@ var ImageEditor = class extends import_obsidian.Modal {
   }
   async replaceRaster(out) {
     this.working = out;
+    this.adjustments = { ...DEFAULT_ADJUSTMENTS };
     this.marks = [];
     this.selected = -1;
     this.resetCorners();
+    ++this.sizeVersion;
+    window.clearTimeout(this.estimateTimer);
+    this.invalidateEncodedPreview();
     await this.checkpoint();
     this.renderControls();
     this.draw();
     this.refreshOutputSize();
-    this.status.setText(`Applied: ${out.width} \xD7 ${out.height}. Annotations flattened into the raster; Undo restores the previous state.`);
+    this.status.setText(`Applied ${out.width} \xD7 ${out.height} \xB7 Undo to restore`);
   }
   async transform(kind) {
     await this.exclusive(async () => {
@@ -1063,8 +1571,18 @@ var ImageEditor = class extends import_obsidian.Modal {
       }
     });
   }
+  async adjustedRaster(background) {
+    const adjustments = { ...this.adjustments }, out = this.composite(background);
+    if (hasAdjustments(adjustments)) {
+      const pixels = ctx(out).getImageData(0, 0, out.width, out.height);
+      const result = await this.process({ data: pixels.data.buffer, width: out.width, height: out.height, adjustments });
+      if (this.closed) throw new Error("Editor closed.");
+      ctx(out).putImageData(new ImageData(new Uint8ClampedArray(result.data), result.width, result.height), 0, 0);
+    }
+    return out;
+  }
   async outputBlob() {
-    const out = this.composite(this.format === "jpg" ? "#fff" : void 0);
+    const out = await this.adjustedRaster(this.format === "jpg" ? "#fff" : void 0);
     const type = `image/${this.format === "jpg" ? "jpeg" : this.format}`;
     const blob = await encode(out, type, this.quality / 100);
     if (blob.type !== type) throw new Error(`This Obsidian version cannot encode ${this.format.toUpperCase()}. The original was not overwritten.`);
@@ -1073,7 +1591,7 @@ var ImageEditor = class extends import_obsidian.Modal {
   invalidateEncodedPreview() {
     this.encodedPreview?.close();
     this.encodedPreview = void 0;
-    this.previewCaption?.setText("Updating encoded preview\u2026");
+    this.previewCaption?.setText("Updating\u2026");
     this.draw();
   }
   refreshOutputSize() {
@@ -1113,9 +1631,10 @@ var ImageEditor = class extends import_obsidian.Modal {
         this.encodedPreview?.close();
         this.encodedPreview = decoded;
         this.draw();
-        this.previewCaption.setText(`Encoded preview: ${this.format.toUpperCase()}${this.format === "png" ? " (lossless)" : ` \xB7 quality ${this.quality}`} \xB7 100% zoom fits the image`);
+        this.previewCaption.setText(`${this.format.toUpperCase()}${this.format === "png" ? " \xB7 lossless" : ` \xB7 quality ${this.quality}`}${hasAdjustments(this.adjustments) ? " \xB7 adjusted" : ""}`);
+        this.previewCaption.title = "Actual encoded preview. 100% zoom fits both dimensions.";
         const diff = Math.round((blob.size / this.original.byteLength - 1) * 100);
-        this.outputInfo.setText(`${this.working.width} \xD7 ${this.working.height} \xB7 ${this.bytes(blob.size)} (${diff >= 0 ? "+" : ""}${diff}% vs original)${diff > 0 ? " \u2014 larger" : ""}`);
+        this.outputInfo.setText(`${this.working.width} \xD7 ${this.working.height} \xB7 ${this.bytes(blob.size)} (${diff >= 0 ? "+" : ""}${diff}%)${diff > 0 ? " \u2191" : ""}`);
       } while (this.estimateAgain && !this.closed);
     } finally {
       this.estimating = false;
@@ -1125,7 +1644,7 @@ var ImageEditor = class extends import_obsidian.Modal {
     return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(2)} MB` : `${(n / 1024).toFixed(1)} KB`;
   }
   async compare() {
-    const modal = new import_obsidian.Modal(this.app);
+    const modal = new import_obsidian2.Modal(this.app);
     modal.titleEl.setText("Before / after (current export settings)");
     modal.modalEl.addClass("image-toolkit-compare");
     const output = await this.outputBlob();
@@ -1144,13 +1663,13 @@ var ImageEditor = class extends import_obsidian.Modal {
     };
     modal.open();
   }
-  askText() {
+  askText(initial = "") {
     return new Promise((resolve) => {
-      const modal = new import_obsidian.Modal(this.app);
+      const modal = new import_obsidian2.Modal(this.app);
       modal.titleEl.setText("Annotation text");
-      const input = modal.contentEl.createEl("input", { type: "text", attr: { placeholder: "Enter text", "aria-label": "Annotation text" } });
+      const input = modal.contentEl.createEl("input", { type: "text", value: initial, attr: { placeholder: "Enter text", "aria-label": "Annotation text" } });
       let result = null;
-      const add = modal.contentEl.createEl("button", { text: "Add text", cls: "mod-cta" });
+      const add = modal.contentEl.createEl("button", { text: initial ? "Apply text" : "Add text", cls: "mod-cta" });
       const submit = () => {
         result = input.value.trim();
         modal.close();
@@ -1168,15 +1687,37 @@ var ImageEditor = class extends import_obsidian.Modal {
       input.focus();
     });
   }
+  async prepareBackupPreferences() {
+    const current = this.options.getBackupPreferences?.() || { backupEnabled: this.options.backupEnabled, backupFolder: this.options.backupFolder, backupConfigured: this.options.backupConfigured === true };
+    let preferences = current;
+    if (!current.backupConfigured) {
+      const choice = await new Promise((resolve) => {
+        const dialog = new BackupPrompt(this.app, current, (result) => {
+          this.childModals.delete(dialog);
+          resolve(result);
+        });
+        this.childModals.add(dialog);
+        dialog.open();
+      });
+      if (!choice || this.closed) return false;
+      await this.options.saveBackupPreferences?.(choice);
+      if (this.closed) return false;
+      preferences = choice;
+    }
+    Object.assign(this.options, preferences, { backupConfigured: true });
+    return !this.closed;
+  }
   async save() {
     await this.exclusive(async () => {
+      if (this.closed || !await this.prepareBackupPreferences()) return;
+      await this.applyAdjustmentRaster();
       if (this.closed) return;
       const blob = await this.outputBlob();
       if (this.closed) return;
       const output = await blob.arrayBuffer();
       if (this.closed) return;
       const result = await saveImage(this.app, this.file, this.original, output, { backupEnabled: this.options.backupEnabled, backupFolder: this.options.backupFolder });
-      new import_obsidian.Notice(`Replaced ${result.path}${result.backupPath ? `
+      new import_obsidian2.Notice(`Replaced ${result.path}${result.backupPath ? `
 Backup: ${result.backupPath}` : ""}`, 8e3);
       this.close();
     });
@@ -1184,11 +1725,10 @@ Backup: ${result.backupPath}` : ""}`, 8e3);
 };
 
 // src/main.ts
-var DEFAULTS = { quality: 85, backupEnabled: true, backupFolder: "Image Toolkit Backups" };
-var ImageToolkit = class extends import_obsidian2.Plugin {
+var ImageToolkit = class extends import_obsidian3.Plugin {
   constructor() {
     super(...arguments);
-    this.settings = { ...DEFAULTS };
+    this.settings = { ...DEFAULT_SETTINGS };
     this.documents = /* @__PURE__ */ new WeakSet();
     this.menuHandled = false;
     this.imageClick = false;
@@ -1197,19 +1737,14 @@ var ImageToolkit = class extends import_obsidian2.Plugin {
     this.editors = /* @__PURE__ */ new Set();
   }
   async onload() {
-    const saved = await this.loadData() || {};
-    this.settings = {
-      quality: Number.isFinite(saved.quality) ? Math.max(10, Math.min(100, saved.quality)) : DEFAULTS.quality,
-      backupEnabled: typeof saved.backupEnabled === "boolean" ? saved.backupEnabled : DEFAULTS.backupEnabled,
-      backupFolder: typeof saved.backupFolder === "string" ? saved.backupFolder : DEFAULTS.backupFolder
-    };
+    this.settings = loadSettings(await this.loadData());
     this.register(() => {
       for (const timer of this.menuTimers) window.clearTimeout(timer);
       this.menuTimers.clear();
     });
     this.addSettingTab(new ToolkitSettings(this.app, this));
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
-      if (file instanceof import_obsidian2.TFile && supportedExtension(file.path)) {
+      if (file instanceof import_obsidian3.TFile && supportedExtension(file.path)) {
         const context = this.clicked?.file.path === file.path ? this.clicked : { file };
         this.addMenu(menu, context);
         if (this.clicked?.file.path === file.path) this.menuHandled = true;
@@ -1235,7 +1770,7 @@ var ImageToolkit = class extends import_obsidian2.Plugin {
       const embed = findImageEmbeds(editor.getValue()).find((e) => e.start <= offset && offset <= e.end);
       const file = embed && view.file && this.resolve(embed.link, view.file.path);
       if (file && embed && view.file) this.open({ file }, "compress");
-      else new import_obsidian2.Notice("Place the cursor on a local JPEG, PNG or WebP embed.");
+      else new import_obsidian3.Notice("Place the cursor on a local JPEG, PNG or WebP embed.");
     } });
     const attach = () => {
       this.attachDocument(document);
@@ -1278,7 +1813,7 @@ var ImageToolkit = class extends import_obsidian2.Plugin {
       const x = event.clientX, y = event.clientY;
       const timer = window.setTimeout(() => {
         if (!this.menuHandled) {
-          const menu = new import_obsidian2.Menu();
+          const menu = new import_obsidian3.Menu();
           this.addMenu(menu, context);
           menu.showAtPosition({ x, y });
         }
@@ -1292,24 +1827,30 @@ var ImageToolkit = class extends import_obsidian2.Plugin {
   addMenu(menu, context) {
     if (this.extendedMenus.has(menu)) return;
     this.extendedMenus.add(menu);
-    const actions = [
-      ["Edit image\u2026", "compress", "image"],
-      ["Compress\u2026", "compress", "minimize-2"],
-      ["Resize\u2026", "resize", "scaling"],
-      ["Crop / straighten\u2026", "crop", "crop"],
-      ["Annotate\u2026", "annotate", "pencil"]
-    ];
     menu.addSeparator();
-    for (const [title, tool, icon] of actions) menu.addItem((item) => item.setTitle(title).setIcon(icon).onClick(() => this.open(context, tool)));
+    menu.addItem((item) => item.setTitle("Edit image").setIcon("image").onClick(() => this.open(context, "compress")));
   }
   open(context, tool) {
-    const options = { tool, quality: this.settings.quality, backupEnabled: this.settings.backupEnabled, backupFolder: this.settings.backupFolder, pluginDir: this.manifest.dir };
+    const options = {
+      tool,
+      quality: this.settings.quality,
+      backupEnabled: this.settings.backupEnabled,
+      backupFolder: this.settings.backupFolder,
+      backupConfigured: this.settings.backupConfigured,
+      pluginDir: this.manifest.dir,
+      getBackupPreferences: () => ({ ...this.settings }),
+      saveBackupPreferences: async (preferences) => {
+        const next = { ...this.settings, ...preferences, backupConfigured: true };
+        await this.saveData(next);
+        this.settings = next;
+      }
+    };
     const editor = new ImageEditor(this.app, context.file, options, () => this.editors.delete(editor));
     this.editors.add(editor);
     editor.open();
   }
 };
-var ToolkitSettings = class extends import_obsidian2.PluginSettingTab {
+var ToolkitSettings = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1317,16 +1858,16 @@ var ToolkitSettings = class extends import_obsidian2.PluginSettingTab {
   display() {
     this.containerEl.empty();
     this.containerEl.createEl("h2", { text: "Image Toolkit" });
-    new import_obsidian2.Setting(this.containerEl).setName("Default quality").setDesc("JPEG / WebP only. PNG is lossless.").addSlider((slider) => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian3.Setting(this.containerEl).setName("Default quality").setDesc("JPEG / WebP only. PNG is lossless.").addSlider((slider) => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async (value) => {
       this.plugin.settings.quality = value;
       await this.plugin.saveData(this.plugin.settings);
     }));
-    new import_obsidian2.Setting(this.containerEl).setName("Back up before overwriting").setDesc("Every Save replaces the original file. When enabled, preserve its previous bytes in the backup folder first. A failed backup cancels saving.").addToggle((toggle) => toggle.setValue(this.plugin.settings.backupEnabled).onChange(async (value) => {
+    new import_obsidian3.Setting(this.containerEl).setName("Back up before overwriting").setDesc("Every Save replaces the original file. When enabled, preserve its previous bytes in the backup folder first. A failed backup cancels saving.").addToggle((toggle) => toggle.setValue(this.plugin.settings.backupEnabled).onChange(async (value) => {
       this.plugin.settings.backupEnabled = value;
       await this.plugin.saveData(this.plugin.settings);
     }));
-    new import_obsidian2.Setting(this.containerEl).setName("Backup folder").setDesc("Vault-relative folder. Source subfolders are mirrored and each overwrite gets a separate backup.").addText((text) => {
-      text.setPlaceholder(DEFAULTS.backupFolder).setValue(this.plugin.settings.backupFolder);
+    new import_obsidian3.Setting(this.containerEl).setName("Backup folder").setDesc("Vault-relative folder. Source subfolders are mirrored and each overwrite gets a separate backup.").addText((text) => {
+      text.setPlaceholder(DEFAULT_SETTINGS.backupFolder).setValue(this.plugin.settings.backupFolder);
       text.inputEl.addEventListener("change", () => {
         void (async () => {
           try {
@@ -1343,6 +1884,6 @@ var ToolkitSettings = class extends import_obsidian2.PluginSettingTab {
       });
       text.inputEl.addEventListener("input", () => text.inputEl.setCustomValidity(""));
     });
-    this.containerEl.createEl("p", { text: "Images are processed locally. Save always overwrites the same image path and preserves its format; all notes referencing it see the change. Backups are enabled by default. Desktop-only preview release." });
+    this.containerEl.createEl("p", { text: "Images are processed locally. Save always overwrites the same image path and preserves its format; all notes referencing it see the change. Backups start disabled; the first Save asks whether to enable them and where to store them. Desktop-only preview release." });
   }
 };

@@ -1,4 +1,5 @@
 import { enhanceBoard, estimateRectifiedSize, rectifyImage, MAX_PIXELS, MAX_DIMENSION, type Point } from './processing';
+import { applyAdjustments, type BasicAdjustments } from './adjustments';
 
 export interface ProcessingRequest {
   id: number;
@@ -10,6 +11,7 @@ export interface ProcessingRequest {
   outHeight?: number;
   mode?: 'whiteboard' | 'blackboard';
   strength?: number;
+  adjustments?: Partial<BasicAdjustments>;
 }
 
 export type ProcessingResponse =
@@ -70,7 +72,10 @@ export function handleMessage(event: MessageEvent<unknown>, scope: WorkerScope):
     } else if (request.strength !== undefined) {
       throw new RangeError('Enhancement strength requires a board mode.');
     }
-    if (!didWork) throw new TypeError('Request must specify perspective correction or board enhancement.');
+    if(request.adjustments!==undefined){
+      data=applyAdjustments(data,width,height,request.adjustments);didWork=true;
+    }
+    if (!didWork) throw new TypeError('Request must specify perspective correction, board enhancement or image adjustments.');
 
     const response: ProcessingResponse = { id, data: data.buffer as ArrayBuffer, width, height };
     scope.postMessage(response, [response.data]);

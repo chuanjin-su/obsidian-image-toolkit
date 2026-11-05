@@ -1,5 +1,9 @@
 import { ImageEditor } from '../../src/editor';
 import { runSmoke } from './scenarios';
+import { runLayoutChecks } from './layout';
+import { runAnnotationChecks } from './annotation-scenarios';
+import { runBackupChecks } from './backup-scenarios';
+import { runAdjustmentChecks } from './adjustment-scenarios';
 const g=window as any;
 g.errors=[];window.addEventListener('error',e=>g.errors.push(e.message));window.addEventListener('unhandledrejection',e=>g.errors.push(String(e.reason)));
 const files=new Map<string,any>();
@@ -21,5 +25,11 @@ const app:any={
   },fileManager:{generateMarkdownLink:(f:any)=>`![[${f.path}]]`}
 };
 g.sourceBytes=bytes;g.data=data;g.app=app;g.files=files;
-g.editor=new ImageEditor(app,source as any,{tool:'crop',quality:85,pluginDir:'.',backupEnabled:true,backupFolder:'Backups/Images'},()=>{});
-g.editor.open();g.runImageToolkitSmoke=runSmoke;
+g.preferences={backupEnabled:false,backupFolder:'Backups/Images',backupConfigured:false};g.preferenceWrites=[];
+g.editorOptions={
+  tool:'crop',quality:85,pluginDir:'.',backupEnabled:false,backupFolder:'Backups/Images',backupConfigured:false,
+  getBackupPreferences:()=>({...g.preferences}),
+  saveBackupPreferences:async(preferences:any)=>{g.preferences={...preferences,backupConfigured:true};g.preferenceWrites.push({...g.preferences});}
+};
+g.editor=new ImageEditor(app,source as any,g.editorOptions,()=>{});
+g.editor.open();g.runImageToolkitSmoke=runSmoke;g.runImageToolkitLayoutChecks=runLayoutChecks;g.runImageToolkitAnnotationChecks=runAnnotationChecks;g.runImageToolkitBackupChecks=runBackupChecks;g.runImageToolkitAdjustmentChecks=runAdjustmentChecks;

@@ -2,13 +2,11 @@ import { Menu, Notice, Plugin, PluginSettingTab, Setting, TFile, type App } from
 import { ImageEditor, type EditorOptions, type Tool } from './editor';
 import { findImageEmbeds, isRemote, supportedExtension } from './embeds';
 import { normalizeBackupFolder } from './storage';
-
-interface Settings { quality: number; backupEnabled: boolean; backupFolder: string }
-const DEFAULTS: Settings = { quality: 85, backupEnabled: true, backupFolder: 'Image Toolkit Backups' };
+import { DEFAULT_SETTINGS, loadSettings, type PluginSettings } from './settings';
 interface Context { file: TFile }
 
 export default class ImageToolkit extends Plugin {
-  settings: Settings = { ...DEFAULTS };
+  settings: PluginSettings = { ...DEFAULT_SETTINGS };
   private documents = new WeakSet<Document>();
   private clicked?: Context;
   private menuHandled = false;
@@ -18,12 +16,7 @@ export default class ImageToolkit extends Plugin {
   private editors = new Set<ImageEditor>();
 
   async onload() {
-    const saved = await this.loadData() || {};
-    this.settings = {
-      quality: Number.isFinite(saved.quality) ? Math.max(10,Math.min(100,saved.quality)) : DEFAULTS.quality,
-      backupEnabled: typeof saved.backupEnabled === 'boolean' ? saved.backupEnabled : DEFAULTS.backupEnabled,
-      backupFolder: typeof saved.backupFolder === 'string' ? saved.backupFolder : DEFAULTS.backupFolder
-    };
+    this.settings = loadSettings(await this.loadData());
     this.register(() => { for (const timer of this.menuTimers) window.clearTimeout(timer); this.menuTimers.clear(); });
     this.addSettingTab(new ToolkitSettings(this.app, this));
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
@@ -108,16 +101,20 @@ export default class ImageToolkit extends Plugin {
   private addMenu(menu: Menu, context: Context) {
     if (this.extendedMenus.has(menu)) return;
     this.extendedMenus.add(menu);
-    const actions: [string, Tool, string][] = [
-      ['Edit image…', 'compress', 'image'], ['Compress…', 'compress', 'minimize-2'],
-      ['Resize…', 'resize', 'scaling'], ['Crop / straighten…', 'crop', 'crop'], ['Annotate…', 'annotate', 'pencil']
-    ];
     menu.addSeparator();
-    for (const [title, tool, icon] of actions) menu.addItem(item => item.setTitle(title).setIcon(icon).onClick(() => this.open(context, tool)));
+    menu.addItem(item=>item.setTitle('Edit image').setIcon('image').onClick(()=>this.open(context,'compress')));
   }
 
   private open(context: Context, tool: Tool) {
-    const options: EditorOptions = { tool, quality: this.settings.quality, backupEnabled: this.settings.backupEnabled, backupFolder: this.settings.backupFolder, pluginDir: this.manifest.dir! };
+    const options: EditorOptions = {
+      tool,quality:this.settings.quality,backupEnabled:this.settings.backupEnabled,backupFolder:this.settings.backupFolder,
+      backupConfigured:this.settings.backupConfigured,pluginDir:this.manifest.dir!,
+      getBackupPreferences:()=>({...this.settings}),
+      saveBackupPreferences:async preferences=>{
+        const next={...this.settings,...preferences,backupConfigured:true};
+        await this.saveData(next);this.settings=next;
+      }
+    };
     const editor = new ImageEditor(this.app, context.file, options, () => this.editors.delete(editor));
     this.editors.add(editor);
     editor.open();
@@ -132,13 +129,13 @@ class ToolkitSettings extends PluginSettingTab {
     new Setting(this.containerEl).setName('Default quality').setDesc('JPEG / WebP only. PNG is lossless.').addSlider(slider => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async value => { this.plugin.settings.quality = value; await this.plugin.saveData(this.plugin.settings); }));
     new Setting(this.containerEl).setName('Back up before overwriting').setDesc('Every Save replaces the original file. When enabled, preserve its previous bytes in the backup folder first. A failed backup cancels saving.').addToggle(toggle => toggle.setValue(this.plugin.settings.backupEnabled).onChange(async value => { this.plugin.settings.backupEnabled=value;await this.plugin.saveData(this.plugin.settings); }));
     new Setting(this.containerEl).setName('Backup folder').setDesc('Vault-relative folder. Source subfolders are mirrored and each overwrite gets a separate backup.').addText(text => {
-      text.setPlaceholder(DEFAULTS.backupFolder).setValue(this.plugin.settings.backupFolder);
+      text.setPlaceholder(DEFAULT_SETTINGS.backupFolder).setValue(this.plugin.settings.backupFolder);
       text.inputEl.addEventListener('change', () => { void (async()=>{
         try {const folder=normalizeBackupFolder(text.getValue());text.inputEl.setCustomValidity('');this.plugin.settings.backupFolder=folder;text.setValue(folder);await this.plugin.saveData(this.plugin.settings);}
         catch(error){text.inputEl.setCustomValidity(String(error));text.inputEl.reportValidity();}
       })(); });
       text.inputEl.addEventListener('input',()=>text.inputEl.setCustomValidity(''));
     });
-    this.containerEl.createEl('p', { text: 'Images are processed locally. Save always overwrites the same image path and preserves its format; all notes referencing it see the change. Backups are enabled by default. Desktop-only preview release.' });
+    this.containerEl.createEl('p', { text: 'Images are processed locally. Save always overwrites the same image path and preserves its format; all notes referencing it see the change. Backups start disabled; the first Save asks whether to enable them and where to store them. Desktop-only preview release.' });
   }
 }
