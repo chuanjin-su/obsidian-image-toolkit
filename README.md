@@ -19,7 +19,7 @@ Reload the plugin (or Obsidian) after rebuilding. Enable **Image Toolkit** in Co
 - **Board:** select Board, drag an initial rectangle, refine its four corners. Select white or black background. Enhancement starts at 0; increasing it applies scan-style background cleanup and stroke enhancement. Inspect the reduced preview before Apply.
 - **Adjust:** exposure (±3 EV), brightness, contrast, saturation, warmth, and sharpening. Sliders preview after a 300 ms debounce; full-resolution processing/encoding can take longer on large images. **Reset sliders** discards the preview; **Apply** commits one undoable edit. Switching tools or saving also commits pending adjustments so they are not lost. Undo first clears an unapplied preview.
 - **Annotate:** choose the icon buttons for selection, pen, highlighter, arrow, rectangle, ellipse or text. Select / move exposes corner resize handles (arrows use endpoints). Selected text supports resizing, font/color changes and **Edit text**. Raster operations flatten annotations; Undo restores them.
-- **Save image:** always overwrites the original path and preserves its format. All notes using that image see the change. There is no copy/overwrite toggle or format-conversion option.
+- **Save image:** always overwrites the original path and preserves its format. Rendered copies refresh immediately across open panes and pop-out windows, without reopening the note or changing its text. There is no copy/overwrite toggle or format-conversion option.
 - **First Save:** backups start **off**. A dialog asks whether to enable backups and which vault-relative folder to use. Continue remembers the choice; Cancel writes nothing. Change it later in Settings → Image Toolkit. When enabled, each overwrite gets a unique original-byte backup with source subfolders mirrored. A failed backup cancels saving. Legacy settings without the new confirmation marker ask again instead of silently retaining the former default-on behavior.
 - Cancel before saving leaves files untouched. Crop/resize changes require Apply before Save.
 
@@ -43,7 +43,7 @@ npm run test:browser
 # Then: await runImageToolkitAdjustmentChecks() // 10 adjustment cases
 # Then: await runImageToolkitAnnotationChecks() // 6 interaction cases
 # Then: await runImageToolkitBackupChecks() // 7 onboarding cases
-# Then: await runImageToolkitSmoke() // 13 editing / BRAT scenarios
+# Then: await runImageToolkitSmoke() // 14 editing / refresh / BRAT scenarios
 # Ctrl-C, or POST /__stop, to stop the loopback server.
 ```
 

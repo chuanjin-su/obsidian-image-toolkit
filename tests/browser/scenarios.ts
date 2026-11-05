@@ -50,6 +50,8 @@ export async function runSmoke() {
   assert(e.working.width===expected.width&&e.working.height===expected.height,'Projective crop');checks.push('projective crop');
   click('Undo');await wait();assert(e.working.width===resizedWidth&&e.working.height===resizedHeight,'Undo');click('Redo');await wait();assert(e.working.width===expected.width&&e.working.height===expected.height,'Redo');checks.push('undo/redo');
   click('Annotate');e.marks.push({kind:'arrow',points:[{x:50,y:50},{x:300,y:200}],color:'#e53935',width:6});await e.checkpoint();e.selected=0;await e.removeSelected();assert(e.marks.length===0,'Annotation deletion');await e.restore(-1);assert(e.marks.length===1,'Annotation undo');checks.push('annotation deletion / undo');
+  const embedded=document.createElement('img');embedded.src=g.app.vault.getResourcePath(e.file);embedded.width=100;embedded.alt='Rendered note image';document.body.append(embedded);await embedded.decode();
+  const embeddedSource=embedded.src;
   const savingFirst=e.save();
   await until(()=>!!document.querySelector('.image-toolkit-backup-prompt'),'First-save backup prompt');
   const prompt=document.querySelector('.image-toolkit-backup-prompt')!;
@@ -57,6 +59,8 @@ export async function runSmoke() {
   const folder=prompt.querySelector<HTMLInputElement>('input[type=text]')!;folder.value='Backups/Images';
   [...prompt.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='Continue & save')!.click();await savingFirst;
   assert(g.preferences.backupConfigured&&g.preferences.backupEnabled,'First-save backup choice persisted');checks.push('first-save backup question and persisted choice');
+  assert(embedded.src!==embeddedSource&&new URL(embedded.src).searchParams.has('image-toolkit'),'Saving must reload the rendered note image');
+  await embedded.decode();assert(embedded.width===100&&embedded.alt==='Rendered note image','Refresh preserves embed attributes');embedded.remove();checks.push('rendered image refresh after save without note reload');
   const backups=g.saved.filter((s:any)=>s.path.startsWith('Backups/Images/'));
   assert(backups.length===1&&g.data.get(backups[0].path).byteLength===g.sourceBytes.byteLength,'Original bytes backed up in configured folder');
   assert(g.saved.filter((s:any)=>s.path==='fixture.jpg').length===1&&g.data.get('fixture.jpg')!==g.sourceBytes,'Save overwrites original path');

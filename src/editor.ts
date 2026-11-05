@@ -2,6 +2,7 @@ import { Modal, Notice, setIcon, type App, type TFile } from 'obsidian';
 import { assertStaticImage } from './embeds';
 import { estimateRectifiedSize, isValidQuad, MAX_PIXELS, MAX_DIMENSION as MAX_SIDE, type Point } from './processing';
 import { saveImage } from './storage';
+import { refreshImageViews } from './refresh';
 import { fitPreviewSize, rectangleCorners } from './preview';
 import { DEFAULT_ADJUSTMENTS, hasAdjustments, type BasicAdjustments } from './adjustments';
 import type { ProcessingRequest } from './processing-worker';
@@ -627,6 +628,10 @@ export class ImageEditor extends Modal {
       const blob=await this.outputBlob();if(this.closed)return;
       const output=await blob.arrayBuffer();if(this.closed)return;
       const result=await saveImage(this.app,this.file,this.original,output,{backupEnabled:this.options.backupEnabled,backupFolder:this.options.backupFolder});
+      // A vault write does not invalidate Chromium's already-rendered image cache.
+      // Refresh only after persistence succeeds; a UI failure must not suggest the save failed.
+      try { refreshImageViews(this.app,this.file,this.containerEl.ownerDocument); }
+      catch (error) { console.error('Image Toolkit: image saved, but refresh failed.',error);new Notice('Image saved, but the preview could not refresh. Reopen the note to see the change.'); }
       new Notice(`Replaced ${result.path}${result.backupPath?`\nBackup: ${result.backupPath}`:''}`,8000);
       this.close();
     });

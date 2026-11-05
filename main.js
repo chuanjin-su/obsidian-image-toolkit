@@ -255,6 +255,23 @@ async function saveImage(app, source, originalBytes, output, options) {
   return { path: sourcePath, backupPath: backup.path };
 }
 
+// src/refresh.ts
+var revision = 0;
+var resourceKey = (url) => url.split(/[?#]/, 1)[0];
+function refreshImageViews(app, file, ownerDocument) {
+  const resource = app.vault.getResourcePath(file);
+  const key = resourceKey(resource);
+  const fresh = new URL(resource);
+  fresh.searchParams.set("image-toolkit", `${Date.now()}-${++revision}`);
+  const documents = /* @__PURE__ */ new Set([ownerDocument]);
+  app.workspace.iterateAllLeaves((leaf) => documents.add(leaf.view.containerEl.ownerDocument));
+  for (const doc of documents) {
+    for (const img of doc.querySelectorAll("img")) {
+      if (resourceKey(img.currentSrc || img.src) === key) img.src = fresh.href;
+    }
+  }
+}
+
 // src/preview.ts
 function fitPreviewSize(width, height, viewportWidth, viewportHeight, zoom = 100, padding = 12) {
   if (![width, height, viewportWidth, viewportHeight, zoom].every((n) => Number.isFinite(n) && n > 0)) throw new Error("Invalid preview dimensions.");
@@ -1719,6 +1736,12 @@ var ImageEditor = class extends import_obsidian2.Modal {
       const output = await blob.arrayBuffer();
       if (this.closed) return;
       const result = await saveImage(this.app, this.file, this.original, output, { backupEnabled: this.options.backupEnabled, backupFolder: this.options.backupFolder });
+      try {
+        refreshImageViews(this.app, this.file, this.containerEl.ownerDocument);
+      } catch (error) {
+        console.error("Image Toolkit: image saved, but refresh failed.", error);
+        new import_obsidian2.Notice("Image saved, but the preview could not refresh. Reopen the note to see the change.");
+      }
       new import_obsidian2.Notice(`Replaced ${result.path}${result.backupPath ? `
 Backup: ${result.backupPath}` : ""}`, 8e3);
       this.close();
