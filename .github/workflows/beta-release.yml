@@ -1,0 +1,57 @@
+name: Publish beta release
+
+on:
+  push:
+    tags:
+      - "[0-9]*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Validate release version
+        run: |
+          node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync("manifest.json"));const p=JSON.parse(fs.readFileSync("package.json"));const v=JSON.parse(fs.readFileSync("versions.json"));if(process.env.GITHUB_REF_NAME!==m.version||p.version!==m.version||v[m.version]!==m.minAppVersion)throw new Error("Tag, manifest, package and compatibility versions must agree");'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Package plugin
+        run: |
+          node --check main.js
+          node --check processing-worker.js
+          mkdir -p dist/image-toolkit
+          cp main.js manifest.json styles.css processing-worker.js dist/image-toolkit/
+          (cd dist && zip -r "image-toolkit-$GITHUB_REF_NAME.zip" image-toolkit)
+          (cd dist/image-toolkit && sha256sum main.js manifest.json styles.css processing-worker.js) > dist/SHA256SUMS.txt
+          (cd dist && sha256sum "image-toolkit-$GITHUB_REF_NAME.zip") >> dist/SHA256SUMS.txt
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --prerelease \
+            --title "Image Toolkit $GITHUB_REF_NAME Beta" \
+            --notes-file RELEASE_NOTES.md \
+            dist/image-toolkit/main.js \
+            dist/image-toolkit/manifest.json \
+            dist/image-toolkit/styles.css \
+            dist/image-toolkit/processing-worker.js \
+            "dist/image-toolkit-$GITHUB_REF_NAME.zip" \
+            dist/SHA256SUMS.txt
