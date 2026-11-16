@@ -4,6 +4,8 @@ import { findImageEmbeds, isRemote, supportedExtension } from './embeds';
 import { normalizeBackupFolder } from './storage';
 import { DEFAULT_SETTINGS, loadSettings, type PluginSettings } from './settings';
 import { ImageRecovery } from './recovery-dialog';
+import { ImageInsertions } from './insertions';
+import { insertedImageName, normalizeImageFolder, normalizeImageNameTemplate } from './insertion-paths';
 interface Context { file: TFile }
 
 export default class ImageToolkit extends Plugin {
@@ -21,6 +23,15 @@ export default class ImageToolkit extends Plugin {
     this.settings = loadSettings(await this.loadData());
     this.register(() => { for (const timer of this.menuTimers) window.clearTimeout(timer); this.menuTimers.clear(); });
     this.addSettingTab(new ToolkitSettings(this.app, this));
+    const insertions = new ImageInsertions(this.app, () => this.settings, message => new Notice(message));
+    this.register(() => insertions.dispose());
+    this.registerEvent(this.app.workspace.on('editor-paste', (event, editor, info) => {
+      void insertions.handle(event, editor, info);
+    }));
+    this.registerEvent(this.app.workspace.on('editor-drop', (event, editor, info) => {
+      void insertions.handle(event, editor, info);
+    }));
+    this.registerEvent(this.app.workspace.on('editor-change', (editor, info) => insertions.onEditorChange(editor, info)));
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
       if (file instanceof TFile && supportedExtension(file.path)) {
         const context = this.clicked?.file.path === file.path ? this.clicked : { file };
@@ -136,6 +147,52 @@ class ToolkitSettings extends PluginSettingTab {
   display() {
     this.containerEl.empty();
     this.containerEl.createEl('h2', { text: 'Image Toolkit' });
+    this.containerEl.createEl('h3', { text: 'Inserted images' });
+    new Setting(this.containerEl).setName('Manage all inserted images').setDesc('Manage new image files pasted or dropped into notes. Existing vault images, text links and remote URLs are left unchanged. Disabled: use Obsidian attachment settings.').addToggle(toggle => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async value => {
+      this.plugin.settings.manageInsertedImages = value;
+      await this.plugin.saveData(this.plugin.settings);
+    }));
+    const validatedText = (name: string, description: string, key: 'imageFolder' | 'imageNameTemplate', normalize: (value: string) => string) => {
+      new Setting(this.containerEl).setName(name).setDesc(description).addText(text => {
+        text.setPlaceholder(DEFAULT_SETTINGS[key]).setValue(this.plugin.settings[key]);
+        text.inputEl.addEventListener('change', () => { void (async () => {
+          try {
+            const value = normalize(text.getValue());
+            text.inputEl.setCustomValidity('');
+            this.plugin.settings[key] = value;
+            text.setValue(value);
+            await this.plugin.saveData(this.plugin.settings);
+            if (key === 'imageNameTemplate') this.display();
+          } catch (error) {
+            text.inputEl.setCustomValidity(error instanceof Error ? error.message : String(error));
+            text.inputEl.reportValidity();
+          }
+        })(); });
+        text.inputEl.addEventListener('input', () => text.inputEl.setCustomValidity(''));
+      });
+    };
+    validatedText('Default image folder', 'Type ./ for the current note folder, _Asset/ for a vault-root folder, ./_Asset/ for a folder beside the note, or / for the vault root. Missing folders are created automatically.', 'imageFolder', normalizeImageFolder);
+    new Setting(this.containerEl).setName('Rename inserted images').setDesc('Apply the filename template on import. Disabled: keep the original name. Name collisions always get -1, -2, etc.; existing files are never overwritten.').addToggle(toggle => toggle.setValue(this.plugin.settings.renameInsertedImages).onChange(async value => {
+      this.plugin.settings.renameInsertedImages = value;
+      await this.plugin.saveData(this.plugin.settings);
+    }));
+    const presets: Record<string, string> = {
+      '<original-name>.<suffix>': 'Original name',
+      '<original-name>-YYYY-MM-DD.<suffix>': 'Original name + date',
+      '<note-name>-YYYY-MM-DD-HHmmss.<suffix>': 'Note name + date and time',
+    };
+    new Setting(this.containerEl).setName('Filename preset').addDropdown(dropdown => dropdown
+      .addOptions({ ...presets, '': 'Custom template' })
+      .setValue(this.plugin.settings.imageNameTemplate in presets ? this.plugin.settings.imageNameTemplate : '')
+      .onChange(async value => {
+        if (!value) return;
+        this.plugin.settings.imageNameTemplate = value;
+        await this.plugin.saveData(this.plugin.settings);
+        this.display();
+      }));
+    validatedText('Filename template', 'Tokens: <original-name>, <note-name>, YYYY, MM, DD, HH, mm, ss (local date/time). Must end with .<suffix>; the original image format is preserved. Applies only when management and renaming are enabled.', 'imageNameTemplate', normalizeImageNameTemplate);
+    this.containerEl.createEl('p', { text: `Example: ${insertedImageName({ name: 'photo.png', type: 'image/png' }, 'My note.md', { ...this.plugin.settings, renameInsertedImages: true })}` });
+    this.containerEl.createEl('h3', { text: 'Image editing' });
     new Setting(this.containerEl).setName('Default quality').setDesc('JPEG / WebP only. PNG is lossless.').addSlider(slider => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async value => { this.plugin.settings.quality = value; await this.plugin.saveData(this.plugin.settings); }));
     new Setting(this.containerEl).setName('Back up before overwriting').setDesc('Every Save replaces the original file. When enabled, preserve its previous bytes in the backup folder first. A failed backup cancels saving.').addToggle(toggle => toggle.setValue(this.plugin.settings.backupEnabled).onChange(async value => { this.plugin.settings.backupEnabled=value;await this.plugin.saveData(this.plugin.settings); }));
     new Setting(this.containerEl).setName('Backup folder').setDesc('Vault-relative folder. Source subfolders are mirrored and each overwrite gets a separate backup.').addText(text => {

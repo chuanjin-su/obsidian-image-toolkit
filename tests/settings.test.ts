@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DEFAULT_SETTINGS, loadSettings } from '../src/settings';
+import { DEFAULT_INSERTION_PREFERENCES } from '../src/insertion-paths';
 
 test('settings defaults disable backups until the choice is configured', () => {
   assert.deepEqual(DEFAULT_SETTINGS, {
+    ...DEFAULT_INSERTION_PREFERENCES,
     quality: 85,
     backupEnabled: false,
     backupConfigured: false,
@@ -34,6 +36,7 @@ test('legacy records without a boolean configuration marker require a new choice
   });
 
   assert.deepEqual(settings, {
+    ...DEFAULT_INSERTION_PREFERENCES,
     quality: 73,
     backupEnabled: false,
     backupConfigured: false,
@@ -49,11 +52,25 @@ test('a modern configured-false record preserves the user enabled preference', (
     backupConfigured: false,
     backupFolder: 'My Backups',
   }), {
+    ...DEFAULT_INSERTION_PREFERENCES,
     quality: 85,
     backupEnabled: true,
     backupConfigured: false,
     backupFolder: 'My Backups',
   });
+});
+
+test('image insertion preferences migrate safely and validate saved paths and templates', () => {
+  assert.equal(loadSettings({}).manageInsertedImages, false);
+  assert.equal(loadSettings({ manageInsertedImages: 'yes' }).manageInsertedImages, false);
+  assert.equal(loadSettings({ renameInsertedImages: 1 }).renameInsertedImages, false);
+  const settings = loadSettings({ manageInsertedImages: true, imageFolder: './assets', renameInsertedImages: true, imageNameTemplate: '<note-name>-YYYY-MM-DD.<suffix>' });
+  assert.equal(settings.manageInsertedImages, true);
+  assert.equal(settings.imageFolder, './assets/');
+  assert.equal(settings.renameInsertedImages, true);
+  assert.equal(settings.imageNameTemplate, '<note-name>-YYYY-MM-DD.<suffix>');
+  assert.equal(loadSettings({ imageFolder: '../outside' }).imageFolder, DEFAULT_SETTINGS.imageFolder);
+  assert.equal(loadSettings({ imageNameTemplate: '../bad.png' }).imageNameTemplate, DEFAULT_SETTINGS.imageNameTemplate);
 });
 
 test('configured backup choices preserve both accepted true and false values', () => {

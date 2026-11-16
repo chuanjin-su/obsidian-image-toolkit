@@ -63,14 +63,14 @@ function isFolder(entry: unknown): entry is FolderLike {
   return typeof entry === "object" && entry !== null && Array.isArray((entry as FolderLike).children);
 }
 
-async function ensureFolder(app: App, path: string): Promise<void> {
+export async function ensureFolder(app: App, path: string, label = 'backup'): Promise<void> {
   const parts = path.split("/").filter(Boolean);
   let current = "";
   for (const part of parts) {
     current = current ? `${current}/${part}` : part;
     const existing = app.vault.getAbstractFileByPath(current);
     if (existing) {
-      if (!isFolder(existing)) throw new Error(`Cannot create backup folder because '${current}' is a file.`);
+      if (!isFolder(existing)) throw new Error(`Cannot create ${label} folder because '${current}' is a file.`);
       continue;
     }
 
@@ -82,7 +82,7 @@ async function ensureFolder(app: App, path: string): Promise<void> {
       if (!isFolder(created)) throw error;
     }
     const created = app.vault.getAbstractFileByPath(current);
-    if (!isFolder(created)) throw new Error(`Could not create backup folder '${current}'.`);
+    if (!isFolder(created)) throw new Error(`Could not create ${label} folder '${current}'.`);
   }
 }
 

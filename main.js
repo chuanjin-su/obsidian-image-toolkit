@@ -171,14 +171,14 @@ async function assertSourceUnchanged(app, source, expectedPath, originalBytes) {
 function isFolder(entry) {
   return typeof entry === "object" && entry !== null && Array.isArray(entry.children);
 }
-async function ensureFolder(app, path) {
+async function ensureFolder(app, path, label = "backup") {
   const parts = path.split("/").filter(Boolean);
   let current = "";
   for (const part of parts) {
     current = current ? `${current}/${part}` : part;
     const existing = app.vault.getAbstractFileByPath(current);
     if (existing) {
-      if (!isFolder(existing)) throw new Error(`Cannot create backup folder because '${current}' is a file.`);
+      if (!isFolder(existing)) throw new Error(`Cannot create ${label} folder because '${current}' is a file.`);
       continue;
     }
     try {
@@ -188,7 +188,7 @@ async function ensureFolder(app, path) {
       if (!isFolder(created2)) throw error;
     }
     const created = app.vault.getAbstractFileByPath(current);
-    if (!isFolder(created)) throw new Error(`Could not create backup folder '${current}'.`);
+    if (!isFolder(created)) throw new Error(`Could not create ${label} folder '${current}'.`);
   }
 }
 function sourceParent(path) {
@@ -340,8 +340,96 @@ var processing_worker_default = '"use strict";\n(() => {\n  // src/processing.ts
 // src/backup-dialog.ts
 var import_obsidian = require("obsidian");
 
+// src/insertion-paths.ts
+var DEFAULT_INSERTION_PREFERENCES = {
+  manageInsertedImages: false,
+  imageFolder: "_Asset/",
+  renameInsertedImages: false,
+  imageNameTemplate: "<original-name>-YYYY-MM-DD.<suffix>"
+};
+var unsafe = /[\u0000-\u001f\u007f-\u009f:*?"<>|]/;
+var imageExtensions = /^(avif|bmp|gif|heic|heif|ico|jfif|jpe?g|png|svg|tiff?|webp)$/i;
+var mimeExtensions = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+  "image/avif": "avif",
+  "image/tiff": "tiff",
+  "image/heic": "heic",
+  "image/heif": "heif",
+  "image/x-icon": "ico",
+  "image/vnd.microsoft.icon": "ico"
+};
+function isInsertedImage(file) {
+  const dot = file.name.lastIndexOf(".");
+  return file.type.startsWith("image/") || dot >= 0 && imageExtensions.test(file.name.slice(dot + 1));
+}
+function normalizeImageFolder(folder) {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(folder)) throw new Error("Image folder cannot contain control characters.");
+  const value = folder.trim().replace(/\\/g, "/");
+  if (value === "/") return "/";
+  if (!value || unsafe.test(value) || value.startsWith("/")) {
+    throw new Error("Image folder must be ./, /, or a relative folder such as _Asset/.");
+  }
+  const relativeToNote = value === "." || value.startsWith("./");
+  const parts = value.split("/").map((part) => part.trim()).filter((part) => part && part !== ".");
+  if (parts.some((part) => part === ".." || /[. ]$/.test(part))) {
+    throw new Error("Image folder cannot contain '..' or names ending with a dot or space.");
+  }
+  if (!parts.length) return "./";
+  return `${relativeToNote ? "./" : ""}${parts.join("/")}/`;
+}
+function imageDestinationFolder(folder, notePath) {
+  const normalized = normalizeImageFolder(folder);
+  if (normalized === "/") return "";
+  if (!normalized.startsWith("./")) return normalized.slice(0, -1);
+  const parent = notePath.includes("/") ? notePath.slice(0, notePath.lastIndexOf("/")) : "";
+  return [parent, normalized.slice(2, -1)].filter(Boolean).join("/");
+}
+function normalizeImageNameTemplate(template) {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(template)) throw new Error("Filename template cannot contain control characters.");
+  const value = template.trim();
+  if (!value.endsWith(".<suffix>")) throw new Error("Filename template must end with .<suffix> to preserve the image format.");
+  const literal = value.replace(/<original-name>|<note-name>|<suffix>/g, "image");
+  if (unsafe.test(literal) || /[/\\]/.test(literal) || !value.slice(0, -9).replace(/[. ]/g, "")) {
+    throw new Error("Filename template contains unsupported characters or placeholders.");
+  }
+  if (value.indexOf("<suffix>") !== value.length - 8) throw new Error("Use <suffix> only at the end of the template.");
+  return value;
+}
+function safeBasename(name) {
+  return name.replace(/[\u0000-\u001f\u007f-\u009f/\\:*?"<>|#\[\]]/g, "-").replace(/^[. ]+|[. ]+$/g, "") || "image";
+}
+function insertedImageName(file, notePath, preferences, date = /* @__PURE__ */ new Date()) {
+  const filename = file.name.split(/[/\\]/).pop() || "image";
+  const dot = filename.lastIndexOf(".");
+  const hasExtension = dot > 0 && /^[a-z0-9]+$/i.test(filename.slice(dot + 1));
+  const suffix = hasExtension ? filename.slice(dot + 1) : mimeExtensions[file.type.toLowerCase()];
+  if (!suffix) throw new Error(`Cannot determine the image extension for '${filename}'.`);
+  const original = safeBasename(hasExtension ? filename.slice(0, dot) : filename);
+  if (!preferences.renameInsertedImages) return `${original}.${suffix}`;
+  const template = normalizeImageNameTemplate(preferences.imageNameTemplate);
+  const pad = (value) => String(value).padStart(2, "0");
+  const values = {
+    YYYY: String(date.getFullYear()),
+    MM: pad(date.getMonth() + 1),
+    DD: pad(date.getDate()),
+    HH: pad(date.getHours()),
+    mm: pad(date.getMinutes()),
+    ss: pad(date.getSeconds())
+  };
+  const noteName = notePath.split("/").pop().replace(/\.md$/i, "");
+  const dated = template.slice(0, -9).replace(/YYYY|MM|DD|HH|mm|ss/g, (token) => values[token]);
+  const basename = dated.replace(/<original-name>|<note-name>/g, (token) => token === "<original-name>" ? original : safeBasename(noteName));
+  return `${safeBasename(basename)}.${suffix}`;
+}
+
 // src/settings.ts
 var DEFAULT_SETTINGS = {
+  ...DEFAULT_INSERTION_PREFERENCES,
   quality: 85,
   backupEnabled: false,
   backupConfigured: false,
@@ -350,7 +438,18 @@ var DEFAULT_SETTINGS = {
 function loadSettings(saved) {
   const record = typeof saved === "object" && saved !== null && !Array.isArray(saved) ? saved : {};
   const hasConfigurationMarker = typeof record.backupConfigured === "boolean";
+  const validated = (key, validate, fallback) => {
+    try {
+      return typeof record[key] === "string" ? validate(record[key]) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
   return {
+    manageInsertedImages: record.manageInsertedImages === true,
+    imageFolder: validated("imageFolder", normalizeImageFolder, DEFAULT_SETTINGS.imageFolder),
+    renameInsertedImages: record.renameInsertedImages === true,
+    imageNameTemplate: validated("imageNameTemplate", normalizeImageNameTemplate, DEFAULT_SETTINGS.imageNameTemplate),
     quality: typeof record.quality === "number" && Number.isFinite(record.quality) ? Math.max(10, Math.min(100, record.quality)) : DEFAULT_SETTINGS.quality,
     backupEnabled: hasConfigurationMarker && typeof record.backupEnabled === "boolean" ? record.backupEnabled : false,
     backupConfigured: hasConfigurationMarker ? record.backupConfigured : false,
@@ -2024,6 +2123,160 @@ Previous version backed up: ${result.backupPath}`, 8e3);
   }
 };
 
+// src/insertions.ts
+var queues = /* @__PURE__ */ new WeakMap();
+async function createAttachment(app, folder, filename, bytes) {
+  const previous = queues.get(app.vault) ?? Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  queues.set(app.vault, current);
+  await previous;
+  try {
+    await ensureFolder(app, folder, "image");
+    const dot = filename.lastIndexOf(".");
+    const base = dot > 0 ? filename.slice(0, dot) : filename;
+    const extension = dot > 0 ? filename.slice(dot) : "";
+    for (let index = 0; Number.isSafeInteger(index); index++) {
+      const name = `${base}${index ? `-${index}` : ""}${extension}`;
+      const path = [folder, name].filter(Boolean).join("/");
+      if (app.vault.getAbstractFileByPath(path)) continue;
+      try {
+        return await app.vault.createBinary(path, bytes);
+      } catch (error) {
+        if (app.vault.getAbstractFileByPath(path)) continue;
+        throw error;
+      }
+    }
+    throw new Error("Could not find a unique attachment filename.");
+  } finally {
+    release();
+    if (queues.get(app.vault) === current) queues.delete(app.vault);
+  }
+}
+async function importInsertedFile(app, file, notePath, preferences, date = /* @__PURE__ */ new Date()) {
+  const image = isInsertedImage(file);
+  let folder, filename;
+  if (image) {
+    folder = imageDestinationFolder(preferences.imageFolder, notePath);
+    filename = insertedImageName(file, notePath, preferences, date);
+  } else {
+    const path = await app.fileManager.getAvailablePathForAttachment(file.name, notePath);
+    const slash = path.lastIndexOf("/");
+    folder = slash < 0 ? "" : path.slice(0, slash);
+    filename = path.slice(slash + 1);
+  }
+  const saved = await createAttachment(app, folder, filename, await file.arrayBuffer());
+  const link = app.fileManager.generateMarkdownLink(saved, notePath);
+  const embeddable = image || /\.(pdf|mp3|wav|m4a|ogg|flac|3gp|mp4|webm|ogv|mov|mkv)$/i.test(saved.path);
+  return { file: saved, embed: embeddable ? `!${link.replace(/^!/, "")}` : link };
+}
+var InsertionRange = class {
+  constructor(from, to, text) {
+    this.from = from;
+    this.to = to;
+    this.text = text;
+    this.valid = true;
+  }
+  update(text) {
+    if (!this.valid || text === this.text) return this.valid;
+    const previous = this.text;
+    let start = 0;
+    while (start < previous.length && start < text.length && previous[start] === text[start]) start++;
+    let end = previous.length, newEnd = text.length;
+    while (end > start && newEnd > start && previous[end - 1] === text[newEnd - 1]) {
+      end--;
+      newEnd--;
+    }
+    const delta = newEnd - end;
+    if (end <= this.from && start < this.from) {
+      this.from += delta;
+      this.to += delta;
+    } else if (start < this.to || start < this.from && end > this.from) {
+      this.valid = false;
+    }
+    this.text = text;
+    return this.valid;
+  }
+};
+var ImageInsertions = class {
+  constructor(app, preferences, notify) {
+    this.app = app;
+    this.preferences = preferences;
+    this.notify = notify;
+    this.disposed = false;
+    this.pending = /* @__PURE__ */ new Set();
+  }
+  dispose() {
+    this.disposed = true;
+    this.pending.clear();
+  }
+  onEditorChange(editor, info) {
+    for (const insertion of this.pending) if (insertion.editor === editor) insertion.sync(info?.file);
+  }
+  handle(event, editor, info) {
+    const preferences = { ...this.preferences() };
+    if (this.disposed || event.defaultPrevented || !preferences.manageInsertedImages || !info.file) return;
+    if (editor.listSelections().length > 1) return;
+    const transfer = "clipboardData" in event ? event.clipboardData : event.dataTransfer;
+    if (!transfer) return;
+    const files = Array.from(transfer.files);
+    if (!files.length) {
+      for (const item of Array.from(transfer.items)) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+    }
+    if (!files.some(isInsertedImage)) return;
+    const note = info.file;
+    const notePath = note.path;
+    let from = editor.posToOffset(editor.getCursor("from"));
+    let to = editor.posToOffset(editor.getCursor("to"));
+    if (!("clipboardData" in event)) {
+      const cm = editor.cm;
+      const drop = event;
+      from = cm?.posAtCoords?.({ x: drop.clientX, y: drop.clientY }) ?? editor.posToOffset(editor.getCursor());
+      to = from;
+    }
+    const range = new InsertionRange(from, to, editor.getValue());
+    const sync = (currentFile = info.file) => {
+      if (currentFile !== note || info.file !== note || info.file.path !== notePath) range.valid = false;
+      return range.valid && range.update(editor.getValue());
+    };
+    event.preventDefault();
+    const pending = { editor, sync };
+    this.pending.add(pending);
+    return (async () => {
+      const links = [];
+      const date = /* @__PURE__ */ new Date();
+      try {
+        for (const file of files) {
+          if (this.disposed || !sync()) break;
+          try {
+            const result = await importInsertedFile(this.app, file, notePath, preferences, date);
+            links.push(result.embed);
+          } catch (error) {
+            this.notify(`Image Toolkit could not insert ${file.name}: ${error instanceof Error ? error.message : String(error)}. Please retry this file.`);
+          }
+        }
+        if (links.length) {
+          if (!this.disposed && sync()) {
+            this.pending.delete(pending);
+            editor.replaceRange(links.join("\n"), editor.offsetToPos(range.from), editor.offsetToPos(range.to));
+          } else {
+            this.notify("Image Toolkit saved attachments, but insertion was cancelled or the note changed. The files remain in the attachment folder.");
+          }
+        }
+      } finally {
+        this.pending.delete(pending);
+      }
+    })();
+  }
+};
+
 // src/main.ts
 var ImageToolkit = class extends import_obsidian4.Plugin {
   constructor() {
@@ -2044,6 +2297,15 @@ var ImageToolkit = class extends import_obsidian4.Plugin {
       this.menuTimers.clear();
     });
     this.addSettingTab(new ToolkitSettings(this.app, this));
+    const insertions = new ImageInsertions(this.app, () => this.settings, (message) => new import_obsidian4.Notice(message));
+    this.register(() => insertions.dispose());
+    this.registerEvent(this.app.workspace.on("editor-paste", (event, editor, info) => {
+      void insertions.handle(event, editor, info);
+    }));
+    this.registerEvent(this.app.workspace.on("editor-drop", (event, editor, info) => {
+      void insertions.handle(event, editor, info);
+    }));
+    this.registerEvent(this.app.workspace.on("editor-change", (editor, info) => insertions.onEditorChange(editor, info)));
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (file instanceof import_obsidian4.TFile && supportedExtension(file.path)) {
         const context = this.clicked?.file.path === file.path ? this.clicked : { file };
@@ -2166,6 +2428,51 @@ var ToolkitSettings = class extends import_obsidian4.PluginSettingTab {
   display() {
     this.containerEl.empty();
     this.containerEl.createEl("h2", { text: "Image Toolkit" });
+    this.containerEl.createEl("h3", { text: "Inserted images" });
+    new import_obsidian4.Setting(this.containerEl).setName("Manage all inserted images").setDesc("Manage new image files pasted or dropped into notes. Existing vault images, text links and remote URLs are left unchanged. Disabled: use Obsidian attachment settings.").addToggle((toggle) => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async (value) => {
+      this.plugin.settings.manageInsertedImages = value;
+      await this.plugin.saveData(this.plugin.settings);
+    }));
+    const validatedText = (name, description, key, normalize) => {
+      new import_obsidian4.Setting(this.containerEl).setName(name).setDesc(description).addText((text) => {
+        text.setPlaceholder(DEFAULT_SETTINGS[key]).setValue(this.plugin.settings[key]);
+        text.inputEl.addEventListener("change", () => {
+          void (async () => {
+            try {
+              const value = normalize(text.getValue());
+              text.inputEl.setCustomValidity("");
+              this.plugin.settings[key] = value;
+              text.setValue(value);
+              await this.plugin.saveData(this.plugin.settings);
+              if (key === "imageNameTemplate") this.display();
+            } catch (error) {
+              text.inputEl.setCustomValidity(error instanceof Error ? error.message : String(error));
+              text.inputEl.reportValidity();
+            }
+          })();
+        });
+        text.inputEl.addEventListener("input", () => text.inputEl.setCustomValidity(""));
+      });
+    };
+    validatedText("Default image folder", "Type ./ for the current note folder, _Asset/ for a vault-root folder, ./_Asset/ for a folder beside the note, or / for the vault root. Missing folders are created automatically.", "imageFolder", normalizeImageFolder);
+    new import_obsidian4.Setting(this.containerEl).setName("Rename inserted images").setDesc("Apply the filename template on import. Disabled: keep the original name. Name collisions always get -1, -2, etc.; existing files are never overwritten.").addToggle((toggle) => toggle.setValue(this.plugin.settings.renameInsertedImages).onChange(async (value) => {
+      this.plugin.settings.renameInsertedImages = value;
+      await this.plugin.saveData(this.plugin.settings);
+    }));
+    const presets = {
+      "<original-name>.<suffix>": "Original name",
+      "<original-name>-YYYY-MM-DD.<suffix>": "Original name + date",
+      "<note-name>-YYYY-MM-DD-HHmmss.<suffix>": "Note name + date and time"
+    };
+    new import_obsidian4.Setting(this.containerEl).setName("Filename preset").addDropdown((dropdown) => dropdown.addOptions({ ...presets, "": "Custom template" }).setValue(this.plugin.settings.imageNameTemplate in presets ? this.plugin.settings.imageNameTemplate : "").onChange(async (value) => {
+      if (!value) return;
+      this.plugin.settings.imageNameTemplate = value;
+      await this.plugin.saveData(this.plugin.settings);
+      this.display();
+    }));
+    validatedText("Filename template", "Tokens: <original-name>, <note-name>, YYYY, MM, DD, HH, mm, ss (local date/time). Must end with .<suffix>; the original image format is preserved. Applies only when management and renaming are enabled.", "imageNameTemplate", normalizeImageNameTemplate);
+    this.containerEl.createEl("p", { text: `Example: ${insertedImageName({ name: "photo.png", type: "image/png" }, "My note.md", { ...this.plugin.settings, renameInsertedImages: true })}` });
+    this.containerEl.createEl("h3", { text: "Image editing" });
     new import_obsidian4.Setting(this.containerEl).setName("Default quality").setDesc("JPEG / WebP only. PNG is lossless.").addSlider((slider) => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async (value) => {
       this.plugin.settings.quality = value;
       await this.plugin.saveData(this.plugin.settings);
