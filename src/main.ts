@@ -32,6 +32,7 @@ export default class ImageToolkit extends Plugin {
     }));
     this.registerEvent(this.app.workspace.on('editor-change', (editor, info) => insertions.onEditorChange(editor, info)));
     if (Platform.isMobile) {
+      insertions.enableNativeAttachments();
       this.addCommand({
         id: 'insert-images-from-device',
         name: 'Insert images from device',
@@ -162,7 +163,7 @@ class ToolkitSettings extends PluginSettingTab {
     this.containerEl.createEl('h2', { text: 'Image Toolkit' });
     this.containerEl.createEl('h3', { text: 'Inserted images' });
     new Setting(this.containerEl).setName('Manage all inserted images').setDesc(Platform.isMobile
-      ? 'Use your image folder for the Insert images from device command and for image files pasted into notes.'
+      ? 'Use your image folder for images attached with the paperclip, selected with Insert images from device, or pasted into notes.'
       : 'Use your image folder for new image files pasted or dropped into notes. Turn off to use Obsidian attachment settings.').addToggle(toggle => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async value => {
       this.plugin.settings.manageInsertedImages = value;
       await this.plugin.saveData(this.plugin.settings);

@@ -117,6 +117,61 @@ function devicePicker() {
   return { input, doc };
 }
 
+function nativeRuntime() {
+  const r = runtime();
+  const note = Object.assign(r.info.file!, { extension: 'md' });
+  const workspace = { activeEditor: r.info as MarkdownFileInfo | null, getActiveFile: () => note };
+  const calls: string[] = [];
+  const original = async (name: string, extension: string, _bytes: ArrayBuffer) => {
+    calls.push(`${name}.${extension}`);
+    return null;
+  };
+  const app = Object.assign(r.app, { workspace, saveAttachment: original });
+  r.manager.enableNativeAttachments();
+  return { ...r, app, workspace, original, calls };
+}
+
+test('native paperclip images share the configured note folder, filename template, and collision handling', async () => {
+  const r = nativeRuntime();
+  r.settings.imageFolder = './Photos/';
+  r.settings.renameInsertedImages = true;
+  r.settings.imageNameTemplate = '<note-name>-<original-name>.<suffix>';
+  const bytes = await image().arrayBuffer();
+  await Promise.all([
+    r.app.saveAttachment('image', 'jpg', bytes),
+    r.app.saveAttachment('image', 'jpg', bytes),
+    r.app.saveAttachment('File Photo', 'HEIC', bytes),
+  ]);
+  for (const name of ['note-image.jpg', 'note-image-1.jpg', 'note-File Photo.HEIC']) {
+    assert.equal(r.entries.get(`Notes/Photos/${name}`).bytes, bytes);
+  }
+  assert.deepEqual(r.calls, []);
+});
+
+test('native non-images, disabled management and imports outside the editor use the host save', async () => {
+  const r = nativeRuntime();
+  const bytes = await image().arrayBuffer();
+  await r.app.saveAttachment('test', 'pdf', bytes);
+  r.settings.manageInsertedImages = false;
+  await r.app.saveAttachment('disabled', 'jpg', bytes);
+  r.settings.manageInsertedImages = true;
+  r.workspace.activeEditor = null;
+  await r.app.saveAttachment('outside', 'jpg', bytes);
+  r.manager.dispose();
+  assert.equal(r.app.saveAttachment, r.original);
+  await r.app.saveAttachment('unloaded', 'jpg', bytes);
+  assert.deepEqual(r.calls, ['test.pdf', 'disabled.jpg', 'outside.jpg', 'unloaded.jpg']);
+  assert.equal(r.entries.size, 0);
+});
+
+test('failed native image saves report the error and leave Obsidian without an attachment to embed', async () => {
+  const r = nativeRuntime();
+  r.failWrites();
+  assert.equal(await r.app.saveAttachment('image', 'jpg', await image().arrayBuffer()), null);
+  assert.match(r.notices[0], /image.jpg.*Disk full/);
+  assert.deepEqual(r.calls, []);
+});
+
 test('the device picker saves selected photos in the configured folder and inserts their embeds', async () => {
   const r = runtime();
   const { input, doc } = devicePicker();

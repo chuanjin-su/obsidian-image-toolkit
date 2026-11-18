@@ -4,7 +4,7 @@ An Obsidian plugin for editing local images, recovering backups, and organizing 
 
 ## Install the beta
 
-Requires Obsidian 1.6.0 or newer. Both installation methods work on desktop and phone. On a phone, choose a beta with mobile support.
+Requires Obsidian 1.6.0 or newer. Both installation methods work on desktop and phone. Choose 0.2.5 or newer for mobile paperclip support.
 
 - **With BRAT.** Install and enable BRAT from Community plugins. Run **BRAT: Add a beta plugin for testing**, enter `chuanjin-su/obsidian-image-toolkit`, and select a beta version. Enable **Image Toolkit** in Community plugins.
 - **Manually.** Download `main.js`, `manifest.json`, and `styles.css` from the [GitHub releases page](https://github.com/chuanjin-su/obsidian-image-toolkit/releases). Place all three files in `.obsidian/plugins/image-toolkit/` in your vault, restart Obsidian, and enable **Image Toolkit**. You can also extract the release's `image-toolkit-<version>.zip` into `.obsidian/plugins/`.
@@ -30,7 +30,7 @@ The editor supports static JPEG, PNG, and WebP files up to 80 MB, 32 megapixels,
 
 Open **Settings → Image Toolkit → Inserted images** and enable **Manage all inserted images**. This starts on for mobile installations without a saved preference and off for desktop installations without one. The default image folder is `_Asset/` at the vault root.
 
-- **On a phone.** While editing a note, run **Image Toolkit: Insert images from device** from the command palette or add it to the mobile toolbar. Select one or more images. The plugin also handles pastes when the phone provides image files on the clipboard. Obsidian's built-in attachment picker uses Obsidian's own attachment settings.
+- **On a phone.** While editing a note, tap the paperclip to select images from Photos or Files, or run **Image Toolkit: Insert images from device**. The plugin also handles pastes when the phone provides image files on the clipboard. iOS Photos can supply a generic filename such as `image.jpg`. Enable **Rename inserted images** and choose a note name or date template for descriptive filenames.
 - **On desktop.** Paste image files or drag them into the note from outside the vault.
 
 The plugin saves the files to the configured folder and inserts embeds using Obsidian's link settings. Imports preserve the original bytes and extension, including for formats such as GIF and SVG. Turning management off returns pastes and drops to Obsidian's attachment handling. Existing vault images and links stay in place.

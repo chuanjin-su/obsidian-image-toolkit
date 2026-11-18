@@ -2155,19 +2155,23 @@ async function createAttachment(app, folder, filename, bytes) {
     if (queues.get(app.vault) === current) queues.delete(app.vault);
   }
 }
+function createImageAttachment(app, file, bytes, notePath, preferences, date = /* @__PURE__ */ new Date()) {
+  const folder = imageDestinationFolder(preferences.imageFolder, notePath);
+  const filename = insertedImageName(file, notePath, preferences, date);
+  return createAttachment(app, folder, filename, bytes);
+}
 async function importInsertedFile(app, file, notePath, preferences, date = /* @__PURE__ */ new Date()) {
   const image = isInsertedImage(file);
-  let folder, filename;
+  let saved;
   if (image) {
-    folder = imageDestinationFolder(preferences.imageFolder, notePath);
-    filename = insertedImageName(file, notePath, preferences, date);
+    saved = await createImageAttachment(app, file, await file.arrayBuffer(), notePath, preferences, date);
   } else {
     const path = await app.fileManager.getAvailablePathForAttachment(file.name, notePath);
     const slash = path.lastIndexOf("/");
-    folder = slash < 0 ? "" : path.slice(0, slash);
-    filename = path.slice(slash + 1);
+    const folder = slash < 0 ? "" : path.slice(0, slash);
+    const filename = path.slice(slash + 1);
+    saved = await createAttachment(app, folder, filename, await file.arrayBuffer());
   }
-  const saved = await createAttachment(app, folder, filename, await file.arrayBuffer());
   const link = app.fileManager.generateMarkdownLink(saved, notePath);
   const embeddable = image || /\.(pdf|mp3|wav|m4a|ogg|flac|3gp|mp4|webm|ogv|mov|mkv)$/i.test(saved.path);
   return { file: saved, embed: embeddable ? `!${link.replace(/^!/, "")}` : link };
@@ -2212,6 +2216,33 @@ var ImageInsertions = class {
     this.disposed = true;
     this.cancelPicker?.();
     this.pending.clear();
+    this.restoreNativeSave?.();
+  }
+  enableNativeAttachments() {
+    const app = this.app;
+    const original = app.saveAttachment;
+    if (typeof original !== "function" || this.restoreNativeSave) return;
+    const hadOwnMethod = Object.prototype.hasOwnProperty.call(app, "saveAttachment");
+    const save = async (name, extension, bytes) => {
+      const preferences = this.preferences();
+      const note = app.workspace.activeEditor?.file;
+      const file = { name: `${name}.${extension}`, type: "" };
+      if (this.disposed || !preferences.manageInsertedImages || note?.extension !== "md" || note !== app.workspace.getActiveFile() || !isInsertedImage(file)) {
+        return original.call(app, name, extension, bytes);
+      }
+      try {
+        return await createImageAttachment(app, file, bytes, note.path, preferences);
+      } catch (error) {
+        this.notify(`Image Toolkit could not insert ${file.name}: ${error instanceof Error ? error.message : String(error)}. Please retry this file.`);
+        return null;
+      }
+    };
+    app.saveAttachment = save;
+    this.restoreNativeSave = () => {
+      if (app.saveAttachment !== save) return;
+      if (hadOwnMethod) app.saveAttachment = original;
+      else delete app.saveAttachment;
+    };
   }
   onEditorChange(editor, info) {
     for (const insertion of this.pending) if (insertion.editor === editor) insertion.sync(info?.file);
@@ -2350,6 +2381,7 @@ var ImageToolkit = class extends import_obsidian4.Plugin {
     }));
     this.registerEvent(this.app.workspace.on("editor-change", (editor, info) => insertions.onEditorChange(editor, info)));
     if (import_obsidian4.Platform.isMobile) {
+      insertions.enableNativeAttachments();
       this.addCommand({
         id: "insert-images-from-device",
         name: "Insert images from device",
@@ -2489,7 +2521,7 @@ var ToolkitSettings = class extends import_obsidian4.PluginSettingTab {
     this.containerEl.empty();
     this.containerEl.createEl("h2", { text: "Image Toolkit" });
     this.containerEl.createEl("h3", { text: "Inserted images" });
-    new import_obsidian4.Setting(this.containerEl).setName("Manage all inserted images").setDesc(import_obsidian4.Platform.isMobile ? "Use your image folder for the Insert images from device command and for image files pasted into notes." : "Use your image folder for new image files pasted or dropped into notes. Turn off to use Obsidian attachment settings.").addToggle((toggle) => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async (value) => {
+    new import_obsidian4.Setting(this.containerEl).setName("Manage all inserted images").setDesc(import_obsidian4.Platform.isMobile ? "Use your image folder for images attached with the paperclip, selected with Insert images from device, or pasted into notes." : "Use your image folder for new image files pasted or dropped into notes. Turn off to use Obsidian attachment settings.").addToggle((toggle) => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async (value) => {
       this.plugin.settings.manageInsertedImages = value;
       await this.plugin.saveData(this.plugin.settings);
     }));

@@ -31,11 +31,13 @@ test('mobile startup registers device import and paste without starting desktop 
   const p = await plugin(true);
   const events: string[] = [];
   const commands: any[] = [];
-  p.app = { workspace: { on(name: string) { events.push(name); } } };
+  const nativeSave = async () => null;
+  p.app = { saveAttachment: nativeSave, workspace: { on(name: string) { events.push(name); } } };
   p.loadData = async () => undefined;
   p.register = p.registerEvent = p.addSettingTab = () => {};
   p.addCommand = (command: unknown) => commands.push(command);
   await p.onload();
+  assert.notEqual(p.app.saveAttachment, nativeSave);
   assert.deepEqual(events, ['editor-paste', 'editor-drop', 'editor-change']);
   assert.deepEqual(commands.map(command => command.id), ['insert-images-from-device']);
   const editor = { listSelections: () => [{}] };

@@ -32,22 +32,30 @@ async function createAttachment(app: App, folder: string, filename: string, byte
   }
 }
 
+function createImageAttachment(
+  app: App, file: Pick<File, 'name' | 'type'>, bytes: ArrayBuffer, notePath: string,
+  preferences: InsertionPreferences, date = new Date(),
+): Promise<TFile> {
+  const folder = imageDestinationFolder(preferences.imageFolder, notePath);
+  const filename = insertedImageName(file, notePath, preferences, date);
+  return createAttachment(app, folder, filename, bytes);
+}
+
 export async function importInsertedFile(
   app: App, file: File, notePath: string, preferences: InsertionPreferences, date = new Date(),
 ): Promise<{ file: TFile; embed: string }> {
   const image = isInsertedImage(file);
-  let folder: string, filename: string;
+  let saved: TFile;
   if (image) {
-    folder = imageDestinationFolder(preferences.imageFolder, notePath);
-    filename = insertedImageName(file, notePath, preferences, date);
+    saved = await createImageAttachment(app, file, await file.arrayBuffer(), notePath, preferences, date);
   } else {
     // Mixed drops/pastes keep non-image attachments in Obsidian's configured folder.
     const path = await app.fileManager.getAvailablePathForAttachment(file.name, notePath);
     const slash = path.lastIndexOf('/');
-    folder = slash < 0 ? '' : path.slice(0, slash);
-    filename = path.slice(slash + 1);
+    const folder = slash < 0 ? '' : path.slice(0, slash);
+    const filename = path.slice(slash + 1);
+    saved = await createAttachment(app, folder, filename, await file.arrayBuffer());
   }
-  const saved = await createAttachment(app, folder, filename, await file.arrayBuffer());
   const link = app.fileManager.generateMarkdownLink(saved, notePath);
   const embeddable = image || /\.(pdf|mp3|wav|m4a|ogg|flac|3gp|mp4|webm|ogv|mov|mkv)$/i.test(saved.path);
   return { file: saved, embed: embeddable ? `!${link.replace(/^!/, '')}` : link };
@@ -87,10 +95,13 @@ interface PendingInsertion {
   sync: (file?: TFile | null) => boolean;
 }
 
+type NativeAttachmentSave = (name: string, extension: string, bytes: ArrayBuffer) => Promise<TFile | null>;
+
 export class ImageInsertions {
   private disposed = false;
   private pending = new Set<PendingInsertion>();
   private cancelPicker?: () => void;
+  private restoreNativeSave?: () => void;
 
   constructor(
     private app: App,
@@ -102,6 +113,37 @@ export class ImageInsertions {
     this.disposed = true;
     this.cancelPicker?.();
     this.pending.clear();
+    this.restoreNativeSave?.();
+  }
+
+  enableNativeAttachments() {
+    // The mobile paperclip command calls this internal method directly, bypassing editor-paste.
+    const app = this.app as App & { saveAttachment?: NativeAttachmentSave };
+    const original = app.saveAttachment;
+    if (typeof original !== 'function' || this.restoreNativeSave) return;
+    const hadOwnMethod = Object.prototype.hasOwnProperty.call(app, 'saveAttachment');
+    const save: NativeAttachmentSave = async (name, extension, bytes) => {
+      const preferences = this.preferences();
+      const note = app.workspace.activeEditor?.file;
+      const file = { name: `${name}.${extension}`, type: '' };
+      if (this.disposed || !preferences.manageInsertedImages || note?.extension !== 'md' ||
+          note !== app.workspace.getActiveFile() || !isInsertedImage(file)) {
+        return original.call(app, name, extension, bytes);
+      }
+      try {
+        return await createImageAttachment(app, file, bytes, note.path, preferences);
+      } catch (error) {
+        this.notify(`Image Toolkit could not insert ${file.name}: ${error instanceof Error ? error.message : String(error)}. Please retry this file.`);
+        return null;
+      }
+    };
+    app.saveAttachment = save;
+    this.restoreNativeSave = () => {
+      // A later wrapper may still call ours. The disposed check forwards those calls.
+      if (app.saveAttachment !== save) return;
+      if (hadOwnMethod) app.saveAttachment = original;
+      else delete app.saveAttachment;
+    };
   }
 
   onEditorChange(editor: Editor, info?: MarkdownFileInfo) {

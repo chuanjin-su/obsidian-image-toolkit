@@ -18,6 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Fetch the tag object so its annotation is available to gh release create.
+          ref: ${{ github.ref }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
