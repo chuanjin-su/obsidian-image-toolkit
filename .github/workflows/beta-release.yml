@@ -48,7 +48,7 @@ jobs:
             --verify-tag \
             --prerelease \
             --title "Image Toolkit $GITHUB_REF_NAME Beta" \
-            --notes-file RELEASE_NOTES.md \
+            --notes-from-tag \
             dist/image-toolkit/main.js \
             dist/image-toolkit/manifest.json \
             dist/image-toolkit/styles.css \

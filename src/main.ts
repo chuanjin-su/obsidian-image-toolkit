@@ -1,4 +1,4 @@
-import { Menu, Notice, Plugin, PluginSettingTab, Setting, TFile, type App } from 'obsidian';
+import { Menu, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile, type App } from 'obsidian';
 import { ImageEditor, type EditorOptions, type Tool } from './editor';
 import { findImageEmbeds, isRemote, supportedExtension } from './embeds';
 import { normalizeBackupFolder } from './storage';
@@ -20,8 +20,7 @@ export default class ImageToolkit extends Plugin {
   private recoveries = new Set<ImageRecovery>();
 
   async onload() {
-    this.settings = loadSettings(await this.loadData());
-    this.register(() => { for (const timer of this.menuTimers) window.clearTimeout(timer); this.menuTimers.clear(); });
+    this.settings = loadSettings(await this.loadData(), Platform.isMobile);
     this.addSettingTab(new ToolkitSettings(this.app, this));
     const insertions = new ImageInsertions(this.app, () => this.settings, message => new Notice(message));
     this.register(() => insertions.dispose());
@@ -32,6 +31,20 @@ export default class ImageToolkit extends Plugin {
       void insertions.handle(event, editor, info);
     }));
     this.registerEvent(this.app.workspace.on('editor-change', (editor, info) => insertions.onEditorChange(editor, info)));
+    if (Platform.isMobile) {
+      this.addCommand({
+        id: 'insert-images-from-device',
+        name: 'Insert images from device',
+        icon: 'image-plus',
+        editorCheckCallback: (checking, editor, info) => {
+          if (!insertions.canPickImages(editor, info)) return false;
+          if (!checking) void insertions.pickImages(document, editor, info);
+          return true;
+        },
+      });
+      return;
+    }
+    this.register(() => { for (const timer of this.menuTimers) window.clearTimeout(timer); this.menuTimers.clear(); });
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
       if (file instanceof TFile && supportedExtension(file.path)) {
         const context = this.clicked?.file.path === file.path ? this.clicked : { file };
@@ -148,7 +161,9 @@ class ToolkitSettings extends PluginSettingTab {
     this.containerEl.empty();
     this.containerEl.createEl('h2', { text: 'Image Toolkit' });
     this.containerEl.createEl('h3', { text: 'Inserted images' });
-    new Setting(this.containerEl).setName('Manage all inserted images').setDesc('Manage new image files pasted or dropped into notes. Existing vault images, text links and remote URLs are left unchanged. Disabled: use Obsidian attachment settings.').addToggle(toggle => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async value => {
+    new Setting(this.containerEl).setName('Manage all inserted images').setDesc(Platform.isMobile
+      ? 'Use your image folder for the Insert images from device command and for image files pasted into notes.'
+      : 'Use your image folder for new image files pasted or dropped into notes. Turn off to use Obsidian attachment settings.').addToggle(toggle => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async value => {
       this.plugin.settings.manageInsertedImages = value;
       await this.plugin.saveData(this.plugin.settings);
     }));
@@ -192,6 +207,7 @@ class ToolkitSettings extends PluginSettingTab {
       }));
     validatedText('Filename template', 'Tokens: <original-name>, <note-name>, YYYY, MM, DD, HH, mm, ss (local date/time). Must end with .<suffix>; the original image format is preserved. Applies only when management and renaming are enabled.', 'imageNameTemplate', normalizeImageNameTemplate);
     this.containerEl.createEl('p', { text: `Example: ${insertedImageName({ name: 'photo.png', type: 'image/png' }, 'My note.md', { ...this.plugin.settings, renameInsertedImages: true })}` });
+    if (Platform.isMobile) return;
     this.containerEl.createEl('h3', { text: 'Image editing' });
     new Setting(this.containerEl).setName('Default quality').setDesc('JPEG / WebP only. PNG is lossless.').addSlider(slider => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async value => { this.plugin.settings.quality = value; await this.plugin.saveData(this.plugin.settings); }));
     new Setting(this.containerEl).setName('Back up before overwriting').setDesc('Every Save replaces the original file. When enabled, preserve its previous bytes in the backup folder first. A failed backup cancels saving.').addToggle(toggle => toggle.setValue(this.plugin.settings.backupEnabled).onChange(async value => { this.plugin.settings.backupEnabled=value;await this.plugin.saveData(this.plugin.settings); }));

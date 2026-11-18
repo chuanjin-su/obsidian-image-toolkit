@@ -80,9 +80,17 @@ export class InsertionRange {
   }
 }
 
+interface PendingInsertion {
+  editor: Editor;
+  notePath: string;
+  range: InsertionRange;
+  sync: (file?: TFile | null) => boolean;
+}
+
 export class ImageInsertions {
   private disposed = false;
-  private pending = new Set<{ editor: Editor; sync: (file?: TFile | null) => boolean }>();
+  private pending = new Set<PendingInsertion>();
+  private cancelPicker?: () => void;
 
   constructor(
     private app: App,
@@ -92,11 +100,50 @@ export class ImageInsertions {
 
   dispose() {
     this.disposed = true;
+    this.cancelPicker?.();
     this.pending.clear();
   }
 
   onEditorChange(editor: Editor, info?: MarkdownFileInfo) {
     for (const insertion of this.pending) if (insertion.editor === editor) insertion.sync(info?.file);
+  }
+
+  canPickImages(editor: Editor, info: MarkdownFileInfo): boolean {
+    return !this.disposed && this.preferences().manageInsertedImages && !!info.file && editor.listSelections().length === 1;
+  }
+
+  pickImages(doc: Document, editor: Editor, info: MarkdownFileInfo): Promise<void> | void {
+    const note = info.file;
+    if (!note || !this.canPickImages(editor, info)) return;
+    const preferences = { ...this.preferences() };
+    const from = editor.posToOffset(editor.getCursor('from'));
+    const to = editor.posToOffset(editor.getCursor('to'));
+    const insertion = this.trackInsertion(editor, info, note, from, to);
+    return this.insertFiles(insertion, this.chooseImages(doc), preferences);
+  }
+
+  private chooseImages(doc: Document): Promise<File[]> {
+    this.cancelPicker?.();
+    return new Promise(resolve => {
+      const input = doc.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*,.heic,.heif';
+      input.multiple = true;
+      input.hidden = true;
+      const finish = (files: File[]) => {
+        if (this.cancelPicker !== cancel) return;
+        this.cancelPicker = undefined;
+        input.remove();
+        resolve(files);
+      };
+      const cancel = () => finish([]);
+      this.cancelPicker = cancel;
+      input.addEventListener('cancel', cancel);
+      input.addEventListener('change', () => finish(Array.from(input.files ?? []).filter(isInsertedImage)));
+      doc.body.append(input);
+      // Open synchronously while the command still has the user's activation.
+      input.click();
+    });
   }
 
   handle(event: ClipboardEvent | DragEvent, editor: Editor, info: MarkdownView | MarkdownFileInfo): Promise<void> | void {
@@ -114,7 +161,6 @@ export class ImageInsertions {
     }
     if (!files.some(isInsertedImage)) return; // Plain text, URLs and existing vault embeds remain native.
     const note = info.file;
-    const notePath = note.path;
     let from = editor.posToOffset(editor.getCursor('from'));
     let to = editor.posToOffset(editor.getCursor('to'));
     if (!('clipboardData' in event)) {
@@ -125,36 +171,51 @@ export class ImageInsertions {
       from = cm?.posAtCoords?.({ x: drop.clientX, y: drop.clientY }) ?? editor.posToOffset(editor.getCursor());
       to = from;
     }
+    event.preventDefault();
+    const insertion = this.trackInsertion(editor, info, note, from, to);
+    return this.insertFiles(insertion, files, preferences);
+  }
+
+  private trackInsertion(editor: Editor, info: MarkdownFileInfo, note: TFile, from: number, to: number): PendingInsertion {
+    const notePath = note.path;
     const range = new InsertionRange(from, to, editor.getValue());
     const sync = (currentFile: TFile | null | undefined = info.file) => {
       if (currentFile !== note || info.file !== note || info.file.path !== notePath) range.valid = false;
       return range.valid && range.update(editor.getValue());
     };
-    event.preventDefault();
-    const pending = { editor, sync };
-    this.pending.add(pending);
-    return (async () => {
-      const links: string[] = [];
+    const insertion = { editor, notePath, range, sync };
+    this.pending.add(insertion);
+    return insertion;
+  }
+
+  private async insertFiles(insertion: PendingInsertion, selection: File[] | Promise<File[]>, preferences: InsertionPreferences) {
+    const { editor, notePath, range, sync } = insertion;
+    const links: string[] = [];
+    try {
+      const files = Array.isArray(selection) ? selection : await selection;
+      if (this.disposed || !files.length) return;
+      if (!sync()) {
+        this.notify('Image Toolkit cancelled the import because the note or insertion range changed.');
+        return;
+      }
       const date = new Date();
-      try {
-        for (const file of files) {
-          if (this.disposed || !sync()) break;
-          try {
-            const result = await importInsertedFile(this.app, file, notePath, preferences, date);
-            links.push(result.embed);
-          } catch (error) {
-            this.notify(`Image Toolkit could not insert ${file.name}: ${error instanceof Error ? error.message : String(error)}. Please retry this file.`);
-          }
+      for (const file of files) {
+        if (this.disposed || !sync()) break;
+        try {
+          const result = await importInsertedFile(this.app, file, notePath, preferences, date);
+          links.push(result.embed);
+        } catch (error) {
+          this.notify(`Image Toolkit could not insert ${file.name}: ${error instanceof Error ? error.message : String(error)}. Please retry this file.`);
         }
-        if (links.length) {
-          if (!this.disposed && sync()) {
-            this.pending.delete(pending);
-            editor.replaceRange(links.join('\n'), editor.offsetToPos(range.from), editor.offsetToPos(range.to));
-          } else {
-            this.notify('Image Toolkit saved attachments, but insertion was cancelled or the note changed. The files remain in the attachment folder.');
-          }
+      }
+      if (links.length) {
+        if (!this.disposed && sync()) {
+          this.pending.delete(insertion);
+          editor.replaceRange(links.join('\n'), editor.offsetToPos(range.from), editor.offsetToPos(range.to));
+        } else {
+          this.notify('Image Toolkit saved attachments, but insertion was cancelled or the note changed. The files remain in the attachment folder.');
         }
-      } finally { this.pending.delete(pending); }
-    })();
+      }
+    } finally { this.pending.delete(insertion); }
   }
 }

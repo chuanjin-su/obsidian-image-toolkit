@@ -73,6 +73,11 @@ test('image insertion preferences migrate safely and validate saved paths and te
   assert.equal(loadSettings({ imageNameTemplate: '../bad.png' }).imageNameTemplate, DEFAULT_SETTINGS.imageNameTemplate);
 });
 
+test('mobile settings default to managing inserted images and preserve a saved opt-out', () => {
+  assert.equal(loadSettings(undefined, true).manageInsertedImages, true);
+  assert.equal(loadSettings({ manageInsertedImages: false }, true).manageInsertedImages, false);
+});
+
 test('configured backup choices preserve both accepted true and false values', () => {
   for (const backupEnabled of [true, false]) {
     assert.equal(loadSettings({ backupConfigured: true, backupEnabled }).backupConfigured, true);

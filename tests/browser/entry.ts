@@ -6,6 +6,7 @@ import { runAnnotationChecks } from './annotation-scenarios';
 import { runBackupChecks } from './backup-scenarios';
 import { runAdjustmentChecks } from './adjustment-scenarios';
 import { runRecoveryChecks } from './recovery-scenarios';
+import { createFixtureJpeg } from './fixture';
 const g=window as any;
 g.errors=[];window.addEventListener('error',e=>g.errors.push(e.message));window.addEventListener('unhandledrejection',e=>g.errors.push(String(e.reason)));
 const files=new Map<string,any>();
@@ -13,7 +14,7 @@ const source={path:'fixture.jpg',name:'fixture.jpg',basename:'fixture',extension
 const note={path:'fixture.md',name:'fixture.md',extension:'md'};
 files.set(source.path,source);files.set(note.path,note);
 const data=new Map<string,ArrayBuffer|string>();
-const bytes=await fetch('/fixture.jpg').then(r=>r.arrayBuffer());data.set(source.path,bytes);data.set(note.path,'![[fixture.jpg|400]]');
+const bytes=await createFixtureJpeg();data.set(source.path,bytes);data.set(note.path,'![[fixture.jpg|400]]');
 const resourcePath=(path:string)=>new URL(`/__images/${encodeURIComponent(path)}`,location.href).href;
 const publish=async(path:string,output:ArrayBuffer)=>{const response=await fetch(resourcePath(path),{method:'PUT',body:output});if(!response.ok)throw new Error('Test resource upload failed');};
 await publish(source.path,bytes);source.stat.size=bytes.byteLength;

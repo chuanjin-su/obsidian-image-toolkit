@@ -19,7 +19,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 };
 
 /** Sanitize saved plugin data and migrate records that predate backup preferences. */
-export function loadSettings(saved: unknown): PluginSettings {
+export function loadSettings(saved: unknown, defaultManageInsertedImages = DEFAULT_SETTINGS.manageInsertedImages): PluginSettings {
   const record = typeof saved === 'object' && saved !== null && !Array.isArray(saved)
     ? saved as Record<string, unknown>
     : {};
@@ -30,7 +30,9 @@ export function loadSettings(saved: unknown): PluginSettings {
   };
 
   return {
-    manageInsertedImages: record.manageInsertedImages === true,
+    manageInsertedImages: typeof record.manageInsertedImages === 'boolean'
+      ? record.manageInsertedImages
+      : defaultManageInsertedImages,
     imageFolder: validated('imageFolder', normalizeImageFolder, DEFAULT_SETTINGS.imageFolder),
     renameInsertedImages: record.renameInsertedImages === true,
     imageNameTemplate: validated('imageNameTemplate', normalizeImageNameTemplate, DEFAULT_SETTINGS.imageNameTemplate),

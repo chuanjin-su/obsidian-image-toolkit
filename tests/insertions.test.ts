@@ -102,6 +102,71 @@ function runtime() {
   };
 }
 
+function devicePicker() {
+  const input = Object.assign(new EventTarget(), {
+    files: [] as File[],
+    clicked: false,
+    attached: false,
+    click() { this.clicked = true; },
+    remove() { this.attached = false; },
+  });
+  const doc = {
+    createElement(tag: string) { assert.equal(tag, 'input'); return input; },
+    body: { append(element: typeof input) { element.attached = true; } },
+  } as unknown as Document;
+  return { input, doc };
+}
+
+test('the device picker saves selected photos in the configured folder and inserts their embeds', async () => {
+  const r = runtime();
+  const { input, doc } = devicePicker();
+  r.settings.imageFolder = './Photos/';
+  r.settings.renameInsertedImages = true;
+  r.settings.imageNameTemplate = '<note-name>-<original-name>.<suffix>';
+  const pending = r.manager.pickImages(doc, r.editor, r.info);
+  assert.equal(input.clicked, true);
+  assert.equal(input.attached, true);
+  r.value = 'typed ' + r.value;
+  r.manager.onEditorChange(r.editor, r.info);
+  input.files = [image('photo.heic', ''), new File(['pdf'], 'document.pdf'), image()];
+  input.dispatchEvent(new Event('change'));
+  await pending;
+  assert.equal(r.value, 'typed before ![[Notes/Photos/note-photo.heic]]\n![[Notes/Photos/note-photo.png]] after');
+  assert.equal(r.history.length, 1);
+  assert.equal(r.entries.has('Default/document.pdf'), false);
+  assert.deepEqual(new Uint8Array(r.entries.get('Notes/Photos/note-photo.heic').bytes), new Uint8Array([1, 2, 3]));
+  assert.equal(input.attached, false);
+});
+
+test('a cancelled or unloaded device picker leaves no files or editor changes', async () => {
+  for (const unload of [false, true]) {
+    const r = runtime();
+    const { input, doc } = devicePicker();
+    const pending = r.manager.pickImages(doc, r.editor, r.info);
+    if (unload) r.manager.dispose();
+    else input.dispatchEvent(new Event('cancel'));
+    input.files = [image()];
+    input.dispatchEvent(new Event('change'));
+    await pending;
+    assert.equal(r.entries.size, 0);
+    assert.equal(r.value, 'before SELECT after');
+    assert.equal(input.attached, false);
+  }
+});
+
+test('switching notes while the device picker is open cancels the import before writing files', async () => {
+  const r = runtime();
+  const { input, doc } = devicePicker();
+  const pending = r.manager.pickImages(doc, r.editor, r.info);
+  r.manager.onEditorChange(r.editor, { file: { path: 'Another.md' } } as MarkdownFileInfo);
+  input.files = [image()];
+  input.dispatchEvent(new Event('change'));
+  await pending;
+  assert.equal(r.entries.size, 0);
+  assert.equal(r.value, 'before SELECT after');
+  assert.match(r.notices[0], /note or insertion range changed/);
+});
+
 test('image import writes unmodified bytes to chosen folders, preserving extensions', async () => {
   const r = runtime();
   const result = await importInsertedFile(r.app, image('photo.PNG'), 'Notes/note.md', { ...preferences, imageFolder: './', renameInsertedImages: true }, date);

@@ -6,9 +6,9 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const makeBundle = () => build({ entryPoints: [`${root}tests/browser/entry.ts`], bundle: true, format: 'esm', target: 'es2022', write: false, plugins: [embeddedWorkerPlugin()], alias: { obsidian: `${root}tests/browser/obsidian.ts` } });
 const html = `<!doctype html><meta charset="utf-8"><title>Image Toolkit browser smoke</title><link rel="stylesheet" href="/styles.css"><style>:root{--background-secondary:#eee;--background-modifier-border:#bbb;--interactive-accent:#705dcf;--text-on-accent:white;--text-muted:#666}body{font:14px system-ui;margin:16px}button,input,select{font:inherit;padding:5px}button{cursor:pointer}.modal-container{position:fixed;inset:0;display:grid;place-items:center;background:#8883}.modal{background:white;border:1px solid #aaa;padding:18px;margin:auto}.modal h2{margin-top:0}.notice{white-space:pre-wrap}</style><script type="module" src="/bundle.js"></script>`;
-const routes = { '/': () => html, '/bundle.js': async () => (await makeBundle()).outputFiles[0].contents, '/styles.css': () => readFile(`${root}styles.css`), '/fixture.jpg': () => readFile(`${root}../../../IMG_0425.jpg`) };
-const mime = { '/': 'text/html', '/bundle.js': 'text/javascript', '/styles.css': 'text/css', '/fixture.jpg': 'image/jpeg' };
-// Only test-memory resources are writable. No route writes to the real vault/fixture.
+const routes = { '/': () => html, '/bundle.js': async () => (await makeBundle()).outputFiles[0].contents, '/styles.css': () => readFile(`${root}styles.css`) };
+const mime = { '/': 'text/html', '/bundle.js': 'text/javascript', '/styles.css': 'text/css' };
+// Only test-memory resources are writable.
 const images = new Map();
 const server = createServer(async (req, res) => {
   try {

@@ -21,11 +21,29 @@ function makeMenu(){
   const menu={addSeparator(){separators++;},addItem(callback:(item:any)=>void){const item:any={setTitle(title:string){item.title=title;return item;},setIcon(icon:string){item.icon=icon;return item;},onClick(callback:()=>void){item.click=callback;return item;}};callback(item);items.push(item);}};
   return {menu,items,get separators(){return separators;}};
 }
-async function plugin(){
+async function plugin(isMobile = false){
   const module={exports:{} as any};
-  runInNewContext(await bundle,{module,exports:module.exports,require:(name:string)=>{assert.equal(name,'obsidian');return{Plugin:Stub,PluginSettingTab:Stub,Modal:StubModal,Notice:Stub,Setting:Stub,TFile:Stub,setIcon(){}};}});
+  runInNewContext(await bundle,{module,exports:module.exports,require:(name:string)=>{assert.equal(name,'obsidian');return{Plugin:Stub,PluginSettingTab:Stub,Modal:StubModal,Notice:Stub,Setting:Stub,TFile:Stub,Platform:{isMobile},setIcon(){}};}});
   return new module.exports.default();
 }
+
+test('mobile startup registers device import and paste without starting desktop image menus', async () => {
+  const p = await plugin(true);
+  const events: string[] = [];
+  const commands: any[] = [];
+  p.app = { workspace: { on(name: string) { events.push(name); } } };
+  p.loadData = async () => undefined;
+  p.register = p.registerEvent = p.addSettingTab = () => {};
+  p.addCommand = (command: unknown) => commands.push(command);
+  await p.onload();
+  assert.deepEqual(events, ['editor-paste', 'editor-drop', 'editor-change']);
+  assert.deepEqual(commands.map(command => command.id), ['insert-images-from-device']);
+  const editor = { listSelections: () => [{}] };
+  const info = { file: { path: 'Notes/example.md' } };
+  assert.equal(commands[0].editorCheckCallback(true, editor, info), true);
+  p.settings.manageInsertedImages = false;
+  assert.equal(commands[0].editorCheckCallback(true, editor, info), false);
+});
 test('image menu has exactly one Edit image item, deduplicated per menu',async()=>{
   const p=await plugin(),m=makeMenu(),opens:any[]=[];
   const context={file:{path:'photo.jpg'}};p.open=(...args:any[])=>opens.push(args);

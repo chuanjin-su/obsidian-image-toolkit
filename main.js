@@ -435,7 +435,7 @@ var DEFAULT_SETTINGS = {
   backupConfigured: false,
   backupFolder: "Image Toolkit Backups"
 };
-function loadSettings(saved) {
+function loadSettings(saved, defaultManageInsertedImages = DEFAULT_SETTINGS.manageInsertedImages) {
   const record = typeof saved === "object" && saved !== null && !Array.isArray(saved) ? saved : {};
   const hasConfigurationMarker = typeof record.backupConfigured === "boolean";
   const validated = (key, validate, fallback) => {
@@ -446,7 +446,7 @@ function loadSettings(saved) {
     }
   };
   return {
-    manageInsertedImages: record.manageInsertedImages === true,
+    manageInsertedImages: typeof record.manageInsertedImages === "boolean" ? record.manageInsertedImages : defaultManageInsertedImages,
     imageFolder: validated("imageFolder", normalizeImageFolder, DEFAULT_SETTINGS.imageFolder),
     renameInsertedImages: record.renameInsertedImages === true,
     imageNameTemplate: validated("imageNameTemplate", normalizeImageNameTemplate, DEFAULT_SETTINGS.imageNameTemplate),
@@ -2210,10 +2210,45 @@ var ImageInsertions = class {
   }
   dispose() {
     this.disposed = true;
+    this.cancelPicker?.();
     this.pending.clear();
   }
   onEditorChange(editor, info) {
     for (const insertion of this.pending) if (insertion.editor === editor) insertion.sync(info?.file);
+  }
+  canPickImages(editor, info) {
+    return !this.disposed && this.preferences().manageInsertedImages && !!info.file && editor.listSelections().length === 1;
+  }
+  pickImages(doc, editor, info) {
+    const note = info.file;
+    if (!note || !this.canPickImages(editor, info)) return;
+    const preferences = { ...this.preferences() };
+    const from = editor.posToOffset(editor.getCursor("from"));
+    const to = editor.posToOffset(editor.getCursor("to"));
+    const insertion = this.trackInsertion(editor, info, note, from, to);
+    return this.insertFiles(insertion, this.chooseImages(doc), preferences);
+  }
+  chooseImages(doc) {
+    this.cancelPicker?.();
+    return new Promise((resolve) => {
+      const input = doc.createElement("input");
+      input.type = "file";
+      input.accept = "image/*,.heic,.heif";
+      input.multiple = true;
+      input.hidden = true;
+      const finish = (files) => {
+        if (this.cancelPicker !== cancel) return;
+        this.cancelPicker = void 0;
+        input.remove();
+        resolve(files);
+      };
+      const cancel = () => finish([]);
+      this.cancelPicker = cancel;
+      input.addEventListener("cancel", cancel);
+      input.addEventListener("change", () => finish(Array.from(input.files ?? []).filter(isInsertedImage)));
+      doc.body.append(input);
+      input.click();
+    });
   }
   handle(event, editor, info) {
     const preferences = { ...this.preferences() };
@@ -2232,7 +2267,6 @@ var ImageInsertions = class {
     }
     if (!files.some(isInsertedImage)) return;
     const note = info.file;
-    const notePath = note.path;
     let from = editor.posToOffset(editor.getCursor("from"));
     let to = editor.posToOffset(editor.getCursor("to"));
     if (!("clipboardData" in event)) {
@@ -2241,39 +2275,52 @@ var ImageInsertions = class {
       from = cm?.posAtCoords?.({ x: drop.clientX, y: drop.clientY }) ?? editor.posToOffset(editor.getCursor());
       to = from;
     }
+    event.preventDefault();
+    const insertion = this.trackInsertion(editor, info, note, from, to);
+    return this.insertFiles(insertion, files, preferences);
+  }
+  trackInsertion(editor, info, note, from, to) {
+    const notePath = note.path;
     const range = new InsertionRange(from, to, editor.getValue());
     const sync = (currentFile = info.file) => {
       if (currentFile !== note || info.file !== note || info.file.path !== notePath) range.valid = false;
       return range.valid && range.update(editor.getValue());
     };
-    event.preventDefault();
-    const pending = { editor, sync };
-    this.pending.add(pending);
-    return (async () => {
-      const links = [];
-      const date = /* @__PURE__ */ new Date();
-      try {
-        for (const file of files) {
-          if (this.disposed || !sync()) break;
-          try {
-            const result = await importInsertedFile(this.app, file, notePath, preferences, date);
-            links.push(result.embed);
-          } catch (error) {
-            this.notify(`Image Toolkit could not insert ${file.name}: ${error instanceof Error ? error.message : String(error)}. Please retry this file.`);
-          }
-        }
-        if (links.length) {
-          if (!this.disposed && sync()) {
-            this.pending.delete(pending);
-            editor.replaceRange(links.join("\n"), editor.offsetToPos(range.from), editor.offsetToPos(range.to));
-          } else {
-            this.notify("Image Toolkit saved attachments, but insertion was cancelled or the note changed. The files remain in the attachment folder.");
-          }
-        }
-      } finally {
-        this.pending.delete(pending);
+    const insertion = { editor, notePath, range, sync };
+    this.pending.add(insertion);
+    return insertion;
+  }
+  async insertFiles(insertion, selection, preferences) {
+    const { editor, notePath, range, sync } = insertion;
+    const links = [];
+    try {
+      const files = Array.isArray(selection) ? selection : await selection;
+      if (this.disposed || !files.length) return;
+      if (!sync()) {
+        this.notify("Image Toolkit cancelled the import because the note or insertion range changed.");
+        return;
       }
-    })();
+      const date = /* @__PURE__ */ new Date();
+      for (const file of files) {
+        if (this.disposed || !sync()) break;
+        try {
+          const result = await importInsertedFile(this.app, file, notePath, preferences, date);
+          links.push(result.embed);
+        } catch (error) {
+          this.notify(`Image Toolkit could not insert ${file.name}: ${error instanceof Error ? error.message : String(error)}. Please retry this file.`);
+        }
+      }
+      if (links.length) {
+        if (!this.disposed && sync()) {
+          this.pending.delete(insertion);
+          editor.replaceRange(links.join("\n"), editor.offsetToPos(range.from), editor.offsetToPos(range.to));
+        } else {
+          this.notify("Image Toolkit saved attachments, but insertion was cancelled or the note changed. The files remain in the attachment folder.");
+        }
+      }
+    } finally {
+      this.pending.delete(insertion);
+    }
   }
 };
 
@@ -2291,11 +2338,7 @@ var ImageToolkit = class extends import_obsidian4.Plugin {
     this.recoveries = /* @__PURE__ */ new Set();
   }
   async onload() {
-    this.settings = loadSettings(await this.loadData());
-    this.register(() => {
-      for (const timer of this.menuTimers) window.clearTimeout(timer);
-      this.menuTimers.clear();
-    });
+    this.settings = loadSettings(await this.loadData(), import_obsidian4.Platform.isMobile);
     this.addSettingTab(new ToolkitSettings(this.app, this));
     const insertions = new ImageInsertions(this.app, () => this.settings, (message) => new import_obsidian4.Notice(message));
     this.register(() => insertions.dispose());
@@ -2306,6 +2349,23 @@ var ImageToolkit = class extends import_obsidian4.Plugin {
       void insertions.handle(event, editor, info);
     }));
     this.registerEvent(this.app.workspace.on("editor-change", (editor, info) => insertions.onEditorChange(editor, info)));
+    if (import_obsidian4.Platform.isMobile) {
+      this.addCommand({
+        id: "insert-images-from-device",
+        name: "Insert images from device",
+        icon: "image-plus",
+        editorCheckCallback: (checking, editor, info) => {
+          if (!insertions.canPickImages(editor, info)) return false;
+          if (!checking) void insertions.pickImages(document, editor, info);
+          return true;
+        }
+      });
+      return;
+    }
+    this.register(() => {
+      for (const timer of this.menuTimers) window.clearTimeout(timer);
+      this.menuTimers.clear();
+    });
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (file instanceof import_obsidian4.TFile && supportedExtension(file.path)) {
         const context = this.clicked?.file.path === file.path ? this.clicked : { file };
@@ -2429,7 +2489,7 @@ var ToolkitSettings = class extends import_obsidian4.PluginSettingTab {
     this.containerEl.empty();
     this.containerEl.createEl("h2", { text: "Image Toolkit" });
     this.containerEl.createEl("h3", { text: "Inserted images" });
-    new import_obsidian4.Setting(this.containerEl).setName("Manage all inserted images").setDesc("Manage new image files pasted or dropped into notes. Existing vault images, text links and remote URLs are left unchanged. Disabled: use Obsidian attachment settings.").addToggle((toggle) => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async (value) => {
+    new import_obsidian4.Setting(this.containerEl).setName("Manage all inserted images").setDesc(import_obsidian4.Platform.isMobile ? "Use your image folder for the Insert images from device command and for image files pasted into notes." : "Use your image folder for new image files pasted or dropped into notes. Turn off to use Obsidian attachment settings.").addToggle((toggle) => toggle.setValue(this.plugin.settings.manageInsertedImages).onChange(async (value) => {
       this.plugin.settings.manageInsertedImages = value;
       await this.plugin.saveData(this.plugin.settings);
     }));
@@ -2472,6 +2532,7 @@ var ToolkitSettings = class extends import_obsidian4.PluginSettingTab {
     }));
     validatedText("Filename template", "Tokens: <original-name>, <note-name>, YYYY, MM, DD, HH, mm, ss (local date/time). Must end with .<suffix>; the original image format is preserved. Applies only when management and renaming are enabled.", "imageNameTemplate", normalizeImageNameTemplate);
     this.containerEl.createEl("p", { text: `Example: ${insertedImageName({ name: "photo.png", type: "image/png" }, "My note.md", { ...this.plugin.settings, renameInsertedImages: true })}` });
+    if (import_obsidian4.Platform.isMobile) return;
     this.containerEl.createEl("h3", { text: "Image editing" });
     new import_obsidian4.Setting(this.containerEl).setName("Default quality").setDesc("JPEG / WebP only. PNG is lossless.").addSlider((slider) => slider.setLimits(10, 100, 1).setValue(this.plugin.settings.quality).setDynamicTooltip().onChange(async (value) => {
       this.plugin.settings.quality = value;

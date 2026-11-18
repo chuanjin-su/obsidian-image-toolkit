@@ -1,9 +1,9 @@
 {
   "id": "image-toolkit",
   "name": "Image Toolkit",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "minAppVersion": "1.6.0",
   "description": "Local image editing, backup recovery, and automatic folder and filename management for inserted images.",
   "author": "Image Toolkit",
-  "isDesktopOnly": true
+  "isDesktopOnly": false
 }
