@@ -12,7 +12,11 @@ Object.assign(HTMLElement.prototype,{
   empty(this:HTMLElement){this.replaceChildren();},setText(this:HTMLElement,text:string){this.textContent=text;},
   addClass(this:HTMLElement,...cls:string[]){this.classList.add(...cls);},removeClass(this:HTMLElement,...cls:string[]){this.classList.remove(...cls);},toggleClass(this:HTMLElement,cls:string,value:boolean){this.classList.toggle(cls,value);}
 });
+export class Scope {
+  register() {}
+}
 export class Modal {
+  scope = new Scope();
   containerEl=document.createElement('div');modalEl=document.createElement('section');titleEl=document.createElement('h2');contentEl=document.createElement('div');
   constructor(public app:any){this.containerEl.className='modal-container';this.modalEl.className='modal';this.titleEl.className='modal-title';this.contentEl.className='modal-content';this.modalEl.append(this.titleEl,this.contentEl);this.containerEl.append(this.modalEl);}
   open(){document.body.append(this.containerEl);void this.onOpen();}

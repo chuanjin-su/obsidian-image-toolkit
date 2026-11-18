@@ -129,7 +129,7 @@ async function savingEditor(options: { backup?: boolean; failWrite?: boolean; fa
     require: () => ({ Modal, Notice, setIcon() {} }),
   });
   const editor = new module.exports.ImageEditor(app, file, {
-    tool: 'compress', quality: 85, backupEnabled: !!options.backup, backupFolder: 'Backups', backupConfigured: true,
+    tool: 'resize', quality: 85, backupEnabled: !!options.backup, backupFolder: 'Backups', backupConfigured: true,
   }, () => {});
   Object.assign(editor, {
     original,

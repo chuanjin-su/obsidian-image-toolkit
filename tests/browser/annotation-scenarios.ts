@@ -18,10 +18,26 @@ export async function runAnnotationChecks(){return withFixture(async(g,doc)=>{
   click('Pen');pointer('pointerdown',100,420);pointer('pointermove',160,400);pointer('pointermove',240,450);pointer('pointerup',240,450);await wait();click('Select / move');await drag(160,400,160,400);assert(e.selected===1,'Freehand selection');await drag(240,450,320,500);const path=e.bounds(e.marks[1]);assert(near(path.w,220)&&near(path.h,100),'Freehand resize');checks.push('freehand corner reshaping');
   click('Arrow');await drag(550,80,730,180);click('Select / move');await drag(640,130,640,130);assert(e.selected===2,'Arrow selection');await drag(730,180,800,250);assert(near(e.marks[2].points[0].x,550)&&near(e.marks[2].points[1].x,800)&&near(e.marks[2].points[1].y,250),'Arrow endpoint reshape');checks.push('arrow endpoint reshaping');
   click('Text');pointer('pointerdown',100,300);pointer('pointerup',100,300);await until(()=>!!doc.querySelector('[aria-label="Annotation text"]'),'Text dialog missing');
-  const text=doc.querySelector<HTMLInputElement>('[aria-label="Annotation text"]')!;text.value='Before';click('Add text');await until(()=>e.marks.length===4,'Text mark missing');await wait();click('Select / move');
+  const text=doc.querySelector<HTMLInputElement>('[aria-label="Annotation text"]')!;
+  assert(text.parentElement===e.preview.parentElement&&doc.activeElement===text,'Text input must open on the canvas and receive focus');
+  const key=(input:HTMLInputElement,key:string)=>input.dispatchEvent(new g.KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));
+  text.value='Before';key(text,'Enter');assert(e.marks.length===4&&!text.isConnected,'Enter must commit inline text');click('Select / move');
   let box=e.bounds(e.marks[3]);await drag(box.x+box.w/2,box.y+box.h/2,box.x+box.w/2,box.y+box.h/2);assert(e.selected===3,'Text selection');box=e.bounds(e.marks[3]);
   await drag(box.x+box.w,box.y+box.h,box.x+box.w*1.5,box.y+box.h*2);let resized=e.bounds(e.marks[3]);assert(near(resized.w,box.w*1.5)&&near(resized.h,box.h*2),'Nonuniform text reshape');assert(near(e.marks[3].width,64),'Text font size follows resize');checks.push('text corner resizing');
-  click('Edit text');await until(()=>!!doc.querySelector('[aria-label="Annotation text"]'),'Edit text dialog missing');const edit=doc.querySelector<HTMLInputElement>('[aria-label="Annotation text"]')!;assert(edit.value==='Before','Existing text prefilled');edit.value='After editing';click('Apply text');await until(()=>e.marks[3].text==='After editing','Text edit not applied');await wait();
+  const image=e.preview.getBoundingClientRect();
+  const editText=()=>e.preview.dispatchEvent(new g.MouseEvent('dblclick',{
+    clientX:image.left+(resized.x+resized.w/2)/900*image.width,
+    clientY:image.top+(resized.y+resized.h/2)/600*image.height,bubbles:true,
+  }));
+  editText();
+  const edit=doc.querySelector<HTMLInputElement>('[aria-label="Annotation text"]')!;
+  assert(edit.value==='Before','Double-click must open existing text inline');
+  edit.value='Discarded edit';key(edit,'Escape');
+  assert(e.marks[3].text==='Before'&&!edit.isConnected,'Escape must discard the draft');
+  editText();
+  const next=doc.querySelector<HTMLInputElement>('[aria-label="Annotation text"]')!;
+  next.value='After editing';next.blur();
+  assert(e.marks[3].text==='After editing','Clicking away must apply the edit');
   const font=[...e.controls.querySelectorAll('input[type=range]')].find((el:any)=>el.parentElement.firstChild.textContent.startsWith('Text size')) as HTMLInputElement;font.value='80';font.dispatchEvent(new g.Event('input'));font.dispatchEvent(new g.Event('change'));await wait();assert(near(e.marks[3].width,80),'Selected text font control');
   const color=e.controls.querySelector('input[type=color]') as HTMLInputElement;color.value='#3366ff';color.dispatchEvent(new g.Event('input'));color.dispatchEvent(new g.Event('change'));await wait();assert(e.marks[3].color==='#3366ff','Selected mark color control');
   await e.removeSelected();assert(e.marks.length===3,'Delete text');await e.restore(-1);assert(e.marks.length===4&&e.marks[3].text==='After editing'&&near(e.marks[3].width,80)&&e.marks[3].color==='#3366ff','Text style/edit undo');checks.push('edit text / selected styles / deletion undo');

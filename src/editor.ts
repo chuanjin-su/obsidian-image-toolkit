@@ -1,4 +1,4 @@
-import { Modal, Notice, setIcon, type App, type TFile } from 'obsidian';
+import { Modal, Notice, Scope, setIcon, type App, type TFile } from 'obsidian';
 import { assertStaticImage } from './embeds';
 import { estimateRectifiedSize, isValidQuad, MAX_PIXELS, MAX_DIMENSION as MAX_SIDE, type Point } from './processing';
 import { saveImage } from './storage';
@@ -11,13 +11,12 @@ import { BackupPrompt } from './backup-dialog';
 import type { BackupPreferences } from './settings';
 import { markBounds, moveMark, resizeBounds, resizeMark, hitTestMark, selectionHandles, type MarkKind, type Mark, type Bounds, type Corner } from './annotations';
 
-export type Tool = 'compress' | 'resize' | 'crop' | 'adjust' | 'annotate';
+export type Tool = 'resize' | 'crop' | 'board' | 'adjust' | 'annotate';
 export interface EditorOptions {
   tool:Tool;quality:number;backupEnabled:boolean;backupFolder:string;backupConfigured?:boolean;
   getBackupPreferences?:()=>BackupPreferences&{backupConfigured:boolean};
   saveBackupPreferences?:(preferences:BackupPreferences)=>Promise<void>;
 }
-type BoardMode = 'rectangle' | 'board';
 interface Snapshot { blob: Blob; marks: Mark[] }
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 const clamp = (n: number, low: number, high: number) => Math.max(low, Math.min(high, n));
@@ -47,14 +46,15 @@ export class ImageEditor extends Modal {
   private magnifier?: HTMLCanvasElement;
   private controls!: HTMLElement;
   private toolActions!: HTMLElement;
-  private layout!: HTMLElement;
+  private stage!: HTMLElement;
   private status!: HTMLElement;
   private outputInfo!: HTMLElement;
   private tool: Tool;
-  private mode: BoardMode = 'rectangle';
-  private corners: Point[] = [];
+  private cropCorners: Point[] = [];
+  private boardCorners: Point[] = [];
   private activeCorner = 0;
   private strength = 0;
+  private boardSaturation = 0;
   private boardBackground: 'white' | 'black' = 'white';
   private marks: Mark[] = [];
   private markTool: MarkKind | 'select' = 'pen';
@@ -62,7 +62,8 @@ export class ImageEditor extends Modal {
   private color = '#e53935';
   private lineWidth = 5;
   private fontSize = 32;
-  private dragging?: { corner?:number;mark?:number;point:Point;drawing?:boolean;rectangle?:boolean;originalMark?:Mark;bounds?:Bounds;handle?:'start'|'end'|Corner };
+  private dragging?: { corner?:number;mark?:number;point:Point;drawing?:boolean;moved?:boolean;rectangle?:boolean;originalMark?:Mark;bounds?:Bounds;handle?:'start'|'end'|Corner };
+  private textEdit?: { input: HTMLInputElement; mark: Mark; isNew: boolean; scope: Scope };
   private history: Snapshot[] = [];
   private historyIndex = -1;
   private busy = false;
@@ -114,6 +115,7 @@ export class ImageEditor extends Modal {
 
   onClose() {
     this.closed = true;
+    this.finishTextEdit(false);
     for (const modal of this.childModals) modal.close();
     this.childModals.clear();
     window.clearTimeout(this.previewTimer);
@@ -128,7 +130,11 @@ export class ImageEditor extends Modal {
   private button(parent: HTMLElement, text: string, action: () => void | Promise<void>, primary = false) {
     const b = parent.createEl('button', { text });
     if (primary) b.addClass('mod-cta');
-    b.addEventListener('click', () => { if (!this.busy) void this.run(action); });
+    b.addEventListener('click', () => {
+      if (this.busy) return;
+      this.finishTextEdit(true);
+      void this.run(action);
+    });
     return b;
   }
   private async run(action: () => void | Promise<void>) {
@@ -148,43 +154,51 @@ export class ImageEditor extends Modal {
     this.contentEl.empty();
     const toolbar = this.contentEl.createDiv('image-toolkit-toolbar');
     const tabs=toolbar.createDiv('image-toolkit-tool-tabs');
-    for (const [id, title] of [['compress','Compress'],['resize','Resize'],['crop','Crop / board'],['adjust','Adjust'],['annotate','Annotate']] as [Tool,string][]) {
+    for (const [id, title] of [['resize','Resize'],['crop','Crop'],['board','Board'],['adjust','Adjust'],['annotate','Annotate']] as [Tool,string][]) {
       const b = this.button(tabs,title,()=>this.selectTool(id));
       b.dataset.tool = id;
     }
     const history=toolbar.createDiv('image-toolkit-history');
-    this.button(history, 'Undo', () => this.restore(-1));
-    this.button(history, 'Redo', () => this.restore(1));
-    this.button(history, 'Reset', () => this.exclusive(async () => {
+    this.historyButton(history, 'undo-2', 'Undo', 'Undo', () => this.restore(-1));
+    this.historyButton(history, 'redo-2', 'Redo', 'Redo', () => this.restore(1));
+    this.historyButton(history, 'rotate-ccw', 'Reset', 'Reset to original', () => this.exclusive(async () => {
       this.adjustments={...DEFAULT_ADJUSTMENTS};++this.sizeVersion;window.clearTimeout(this.estimateTimer);this.invalidateEncodedPreview();
       this.working = await decode(new Blob([this.original])); this.marks = []; this.resetCorners(); await this.checkpoint(); this.renderControls(); this.draw(); this.refreshOutputSize();
     }));
-    this.button(history,'Compare',()=>this.compare()).title='Before / after with the current quality';
-    this.layout=this.contentEl.createDiv('image-toolkit-layout');
-    const viewport = this.layout.createDiv('image-toolkit-viewport');
+    this.historyButton(history, 'columns-2', 'Compare', 'Compare original and output', () => this.compare());
+    const layout=this.contentEl.createDiv('image-toolkit-layout');
+    const viewport = layout.createDiv('image-toolkit-viewport');
     const zoomBar = viewport.createDiv('image-toolkit-zoom');
     this.range(zoomBar, 'Zoom', 25, 300, this.zoom, 5, value => { this.zoom = value; this.draw(); }).title='100% fits both dimensions; scroll to pan above 100%';
     this.previewCaption=zoomBar.createDiv('image-toolkit-preview-caption');
     this.scroll = viewport.createDiv('image-toolkit-scroll');
-    const stage=this.scroll.createDiv('image-toolkit-stage');
-    this.preview = stage.createEl('canvas', { attr: { tabindex: '0', 'aria-label': 'Image editing canvas. Drag crop handles; arrow keys nudge the selected corner.' } });
+    this.stage=this.scroll.createDiv('image-toolkit-stage');
+    this.preview = this.stage.createEl('canvas', { attr: { tabindex: '0', 'aria-label': 'Image editing canvas' } });
     this.preview.addEventListener('pointerdown', e => this.pointerDown(e));
     this.preview.addEventListener('pointermove', e => this.pointerMove(e));
     this.preview.addEventListener('pointerup', () => this.pointerUp());
     this.preview.addEventListener('pointercancel', () => this.pointerUp());
+    this.preview.addEventListener('dblclick', e => {
+      if (this.tool !== 'annotate' || this.markTool !== 'select' || this.busy) return;
+      const mark = this.textAt(this.position(e));
+      if (mark) this.startTextEdit(mark, false);
+    });
     this.preview.addEventListener('keydown', e => {
       if (this.busy) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); void this.run(() => this.restore(e.shiftKey ? 1 : -1)); }
       if (this.tool === 'annotate' && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); void this.run(() => this.removeSelected()); }
-      if (this.tool === 'crop' && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
+      if (this.tool === 'annotate' && e.key === 'Enter' && this.marks[this.selected]?.kind === 'text') {
+        e.preventDefault(); this.startTextEdit(this.marks[this.selected], false);
+      }
+      if ((this.tool === 'crop' || this.tool === 'board') && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
         e.preventDefault(); const p = this.corners[this.activeCorner], d = e.shiftKey ? 10 : 1;
         p.x = clamp(p.x + (e.key === 'ArrowRight' ? d : e.key === 'ArrowLeft' ? -d : 0), 0, this.working.width - 1);
         p.y = clamp(p.y + (e.key === 'ArrowDown' ? d : e.key === 'ArrowUp' ? -d : 0), 0, this.working.height - 1);
-        if (this.mode === 'rectangle') this.rectangleFromCorner(this.activeCorner);
+        if (this.tool === 'crop') this.rectangleFromCorner(this.activeCorner);
         this.draw(); this.scheduleBoardPreview();
       }
     });
-    const sidebar=this.layout.createDiv('image-toolkit-sidebar');
+    const sidebar=layout.createDiv('image-toolkit-sidebar');
     this.controls=sidebar.createDiv('image-toolkit-controls');
     this.toolActions=sidebar.createDiv('image-toolkit-tool-actions');
     const footer = this.contentEl.createDiv('image-toolkit-footer');
@@ -195,13 +209,20 @@ export class ImageEditor extends Modal {
     this.outputInfo=exportBar.createSpan({cls:'image-toolkit-output-info'});
     this.status=exportInfo.createDiv('image-toolkit-status');this.status.setAttribute('role','status');
     this.status.setText(`Original ${this.bytes(this.original.byteLength)} · replaces original · backup ${this.options.backupEnabled?'on':'off'}`);
-    this.status.title=`Apply crop/resize before saving. Pending photo adjustments are included automatically. All notes using this image are affected. ${this.options.backupEnabled?`Backups: ${this.options.backupFolder}`:'Backups disabled in plugin settings.'}`;
+    this.status.title=`Apply Resize, Crop, or Board before saving. Pending photo adjustments are included automatically. All notes using this image are affected. ${this.options.backupEnabled?`Backups: ${this.options.backupFolder}`:'Backups disabled in plugin settings.'}`;
     const saveActions=footer.createDiv('image-toolkit-save-actions');
     this.button(saveActions, 'Cancel', () => this.close());
     this.button(saveActions, 'Save image', () => this.save(), true).title=`Replace ${this.file.path}. ${this.options.backupEnabled?`Back up to ${this.options.backupFolder} first.`:'Backups are disabled.'}`;
     this.resizeObserver?.disconnect();
     this.resizeObserver=new ResizeObserver(()=>this.draw());this.resizeObserver.observe(this.scroll);
     this.renderControls();
+  }
+
+  private historyButton(parent: HTMLElement, icon: string, label: string, tooltip: string, action: () => void | Promise<void>) {
+    const button = this.button(parent, '', action);
+    setIcon(button, icon);
+    button.setAttribute('aria-label', label);
+    button.title = tooltip;
   }
 
   private label(parent: HTMLElement, text: string) { return parent.createEl('label', { text, cls: 'image-toolkit-field' }); }
@@ -230,19 +251,20 @@ export class ImageEditor extends Modal {
   private renderControls() {
     if (!this.controls) return;
     this.controls.empty();this.controls.removeAttribute('title');this.toolActions.empty();this.boardPreview=undefined;this.magnifier=undefined;
-    this.layout.toggleClass('image-toolkit-image-only',this.tool==='compress');
     this.contentEl.querySelectorAll<HTMLElement>('[data-tool]').forEach(el => {el.toggleClass('is-active',el.dataset.tool===this.tool);el.setAttribute('aria-pressed',String(el.dataset.tool===this.tool));});
     if (this.tool === 'resize') this.resizeControls();
     if (this.tool === 'crop') this.cropControls();
+    if (this.tool === 'board') this.boardControls();
     if (this.tool === 'annotate') this.annotationControls();
     if (this.tool === 'adjust') this.adjustmentControls();
     if(this.busy)this.setEnabled(false);
   }
 
   private async selectTool(tool:Tool) {
-    if(tool!==this.tool&&hasAdjustments(this.adjustments))await this.applyAdjustments();
+    if (tool === this.tool) return;
+    if(hasAdjustments(this.adjustments))await this.applyAdjustments();
     if(this.closed||this.busy)return;
-    this.tool=tool;this.selected=-1;this.renderControls();this.draw();
+    this.dragging=undefined;this.tool=tool;this.activeCorner=0;this.selected=-1;this.renderControls();this.draw();
   }
   private adjustmentControls() {
     const controls:[keyof BasicAdjustments,string,number,number,number,string][]=[
@@ -289,37 +311,44 @@ export class ImageEditor extends Modal {
   }
 
   private cropControls() {
-    let inspectors:HTMLElement=this.controls;
-    this.select(this.controls,'Mode',{rectangle:'Rectangle crop',board:'Board'},this.mode,v=>{this.mode=v as BoardMode;this.renderControls();this.draw();}).title='Drag to draw a rectangle, then refine corners. Arrow keys nudge; Apply commits the crop.';
-    this.controls.createDiv({text:'Drag to select · refine corners',cls:'image-toolkit-hint'}).title='Drag away from a handle to draw a rectangle. Drag handles independently in Board mode. Arrow keys: 1px; Shift+arrow: 10px. Apply before Save.';
-    if(this.mode==='rectangle') {
-      this.select(this.controls,'Aspect preset',{free:'Free',square:'1:1',landscape:'4:3',wide:'16:9',portrait:'3:4'},'free',v=>{
-        const ratio=({square:1,landscape:4/3,wide:16/9,portrait:3/4} as Record<string,number>)[v];
-        if(!ratio)return;
-        let w=this.working.width-1,h=w/ratio;if(h>this.working.height-1){h=this.working.height-1;w=h*ratio;}
-        const x=(this.working.width-1-w)/2,y=(this.working.height-1-h)/2;
-        this.corners=[{x,y},{x:x+w,y},{x:x+w,y:y+h},{x,y:y+h}];this.draw();
-      });
-      this.controls.title='Aspect presets start a centered crop; subsequent dragging remains freeform.';
-    } else {
-      const background=this.select(this.controls,'Background',{white:'White',black:'Black'},this.boardBackground,v=>{this.boardBackground=v as 'white'|'black';this.scheduleBoardPreview();});
-      background.setAttribute('aria-label','Board background');background.title='White: dark writing. Black: light writing.';
-      this.range(this.controls,'Enhance',0,100,Math.round(this.strength*100),1,v=>{this.strength=v/100;this.scheduleBoardPreview();}).title='0 leaves the rectified image unchanged; higher values clean the background and strengthen writing.';
-      inspectors=this.controls.createDiv('image-toolkit-crop-previews');
-      const board=inspectors.createDiv();board.createDiv({text:'Board preview',cls:'image-toolkit-inspector-label'});
-      this.boardPreview=board.createEl('canvas',{cls:'image-toolkit-board-preview',attr:{'aria-label':'Rectified board preview'}});
-      this.scheduleBoardPreview();
-    }
+    this.controls.createDiv({text:'Drag to draw a crop',cls:'image-toolkit-hint'}).title='Arrow keys nudge a corner by one pixel. Hold Shift to nudge by ten pixels.';
+    this.select(this.controls,'Aspect preset',{free:'Free',square:'1:1',landscape:'4:3',wide:'16:9',portrait:'3:4'},'free',v=>{
+      const ratio=({square:1,landscape:4/3,wide:16/9,portrait:3/4} as Record<string,number>)[v];
+      if(!ratio)return;
+      let w=this.working.width-1,h=w/ratio;if(h>this.working.height-1){h=this.working.height-1;w=h*ratio;}
+      const x=(this.working.width-1-w)/2,y=(this.working.height-1-h)/2;
+      this.corners=[{x,y},{x:x+w,y},{x:x+w,y:y+h},{x,y:y+h}];this.draw();
+    }).title='Aspect presets start a centered crop. Drag the corners to refine it.';
+    this.cornerPrecision(this.controls);
+    this.selectionActions('Apply crop', () => this.applyCrop());
+  }
+
+  private boardControls() {
+    this.controls.createDiv({text:'Align the four board corners',cls:'image-toolkit-hint'}).title='Arrow keys nudge the selected corner. Hold Shift to nudge by ten pixels.';
+    const background=this.select(this.controls,'Background',{white:'White',black:'Black'},this.boardBackground,v=>{this.boardBackground=v as 'white'|'black';this.scheduleBoardPreview();});
+    background.setAttribute('aria-label','Board background');background.title='White for dark writing. Black for light writing.';
+    this.range(this.controls,'Enhance',0,100,Math.round(this.strength*100),1,v=>{this.strength=v/100;this.scheduleBoardPreview();}).title='Clean the background and strengthen writing.';
+    this.range(this.controls,'Saturation',-100,100,this.boardSaturation,1,v=>{this.boardSaturation=v;this.scheduleBoardPreview();}).title='Adjust color intensity after board enhancement.';
+    const inspectors=this.controls.createDiv('image-toolkit-crop-previews');
+    const board=inspectors.createDiv();board.createDiv({text:'Board preview',cls:'image-toolkit-inspector-label'});
+    this.boardPreview=board.createEl('canvas',{cls:'image-toolkit-board-preview',attr:{'aria-label':'Rectified board preview'}});
+    this.cornerPrecision(inspectors);
+    const output=this.details(this.controls,'Output size');
+    this.number(output,'Width',this.boardWidth,value=>{this.boardWidth=value;this.scheduleBoardPreview();},0).title='Output pixels. Set one dimension to preserve the estimated ratio, or use 0 for automatic sizing.';
+    this.number(output,'Height',this.boardHeight,value=>{this.boardHeight=value;this.scheduleBoardPreview();},0).title='Output pixels. Use 0 for automatic sizing.';
+    this.selectionActions('Apply board', () => this.applyBoard());
+    this.scheduleBoardPreview();
+  }
+
+  private cornerPrecision(inspectors: HTMLElement) {
     const precision=this.details(inspectors,'Corner precision',true);
     this.magnifier=precision.createEl('canvas',{cls:'image-toolkit-magnifier',attr:{'aria-label':'Selected corner magnifier'}});this.magnifier.width=160;this.magnifier.height=120;
-    if(this.mode==='board'){
-      const output=this.details(this.controls,'Output size');
-      this.number(output,'Width',this.boardWidth,value=>{this.boardWidth=value;this.scheduleBoardPreview();},0).title='Output pixels; 0 = automatic. Set one dimension to preserve the estimated ratio.';
-      this.number(output,'Height',this.boardHeight,value=>{this.boardHeight=value;this.scheduleBoardPreview();},0).title='Output pixels; 0 = automatic.';
-    }
+  }
+
+  private selectionActions(label: string, apply: () => Promise<void>) {
     const cropActions=this.toolActions.createDiv('image-toolkit-crop-actions');
-    this.button(cropActions,'Reset corners',()=>{this.resetCorners();this.draw();this.scheduleBoardPreview();});
-    this.button(cropActions,'Apply crop',()=>this.exclusive(()=>this.applyCrop()),true).setAttribute('aria-label','Apply crop / board correction');
+    this.button(cropActions,'Reset corners',()=>{this.corners=this.fullImageCorners();this.activeCorner=0;this.draw();this.scheduleBoardPreview();});
+    this.button(cropActions,label,()=>this.exclusive(apply),true);
     const transforms=this.toolActions.createDiv('image-toolkit-transform');
     const actions:[string,'left'|'right'|'horizontal'|'vertical',string][]=[['↶','left','Rotate left 90°'],['↷','right','Rotate right 90°'],['↔','horizontal','Flip horizontally'],['↕','vertical','Flip vertically']];
     for(const [icon,kind,label] of actions){const button=this.button(transforms,icon,()=>this.transform(kind));button.title=label;button.setAttribute('aria-label',label);}
@@ -344,15 +373,85 @@ export class ImageEditor extends Modal {
       const width=mark?.width||this.lineWidth;
       const input=this.range(this.controls,'Stroke width',1,Math.max(40,Math.ceil(width)),width,1,value=>{this.lineWidth=value;if(mark)mark.width=value;changed();});input.addEventListener('change',commit);
     }
-    this.controls.createDiv({text:this.markTool==='select'?'Drag to move · handles to reshape':'Drag to draw · click for text',cls:'image-toolkit-hint'}).title='Select a mark to move, resize or change its style. Arrows have endpoint handles. Text can also be edited. Delete removes the selection.';
-    if(mark?.kind==='text')this.button(this.toolActions,'Edit text',()=>this.editSelectedText());
+    const hint = this.markTool === 'select' ? 'Drag to move. Double-click text to edit.'
+      : this.markTool === 'text' ? 'Click the image to type.' : 'Drag on the image to draw.';
+    this.controls.createDiv({text:hint,cls:'image-toolkit-hint'});
+    if(mark?.kind==='text')this.button(this.toolActions,'Edit text',()=>this.startTextEdit(mark, false));
     this.button(this.toolActions,'Delete selected',()=>this.removeSelected());
   }
 
-  private async editSelectedText() {
-    const index=this.selected,mark=this.marks[index];if(mark?.kind!=='text')return;
-    const text=await this.askText(mark.text||'');if(!text||this.closed||this.marks[index]!==mark)return;
-    await this.exclusive(async()=>{mark.text=text;await this.checkpoint();this.renderControls();this.refreshOutputSize();});
+  private textAt(point: Point) {
+    const tolerance = 4 * this.working.width / this.preview.getBoundingClientRect().width;
+    for (let index = this.marks.length - 1; index >= 0; index--) {
+      const mark = this.marks[index];
+      if (mark.kind === 'text' && hitTestMark(mark, point, tolerance, this.measureText)) return mark;
+    }
+  }
+
+  private startTextEdit(mark: Mark, isNew: boolean) {
+    if (this.busy || this.closed) return;
+    this.finishTextEdit(true);
+    this.selected = isNew ? -1 : this.marks.indexOf(mark);
+    const input = this.stage.createEl('input', {
+      type: 'text', cls: 'image-toolkit-inline-text', value: mark.text ?? '',
+      attr: { placeholder: 'Type text', 'aria-label': 'Annotation text', title: 'Enter to apply, Escape to cancel' },
+    });
+    const scope = new Scope(this.scope);
+    scope.register([], 'Escape', event => {
+      if (event.isComposing) return;
+      this.finishTextEdit(false);
+      this.preview.focus({ preventScroll: true });
+      return false;
+    });
+    this.textEdit = { input, mark, isNew, scope };
+    this.app.keymap.pushScope(scope);
+    input.addEventListener('input', () => this.positionTextEdit());
+    input.addEventListener('blur', () => this.finishTextEdit(true));
+    input.addEventListener('keydown', event => {
+      if (event.isComposing || (event.key !== 'Enter' && event.key !== 'Escape')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.finishTextEdit(event.key === 'Enter');
+      this.preview.focus({ preventScroll: true });
+    });
+    ++this.sizeVersion;
+    window.clearTimeout(this.estimateTimer);
+    this.invalidateEncodedPreview();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  private positionTextEdit() {
+    const edit = this.textEdit;
+    if (!edit) return;
+    const { input, mark } = edit;
+    const [anchor] = mark.points;
+    const scaleX = this.preview.clientWidth / this.working.width;
+    const scaleY = this.preview.clientHeight / this.working.height;
+    const font = clamp(mark.width * scaleY, 14, 68);
+    const width = Math.min(this.stage.clientWidth, Math.max(100, this.measureText(input.value, font) + 22));
+    input.style.fontSize = `${font}px`;
+    input.style.width = `${width}px`;
+    input.style.left = `${clamp(this.preview.offsetLeft + anchor.x * scaleX, 0, this.stage.clientWidth - width)}px`;
+    input.style.top = `${clamp(this.preview.offsetTop + anchor.y * scaleY, 0, Math.max(0, this.stage.clientHeight - input.offsetHeight))}px`;
+  }
+
+  private finishTextEdit(commit: boolean) {
+    const edit = this.textEdit;
+    if (!edit) return;
+    this.textEdit = undefined;
+    this.app.keymap.popScope(edit.scope);
+    const text = edit.input.value.trim();
+    edit.input.remove();
+    if (this.closed) return;
+    if (commit && text && text !== edit.mark.text) {
+      edit.mark.text = text;
+      if (edit.isNew) this.marks.push(edit.mark);
+      this.selected = this.marks.indexOf(edit.mark);
+      // Text changes only the marks. Reuse the current raster snapshot.
+      this.recordSnapshot(this.history[this.historyIndex].blob);
+    }
+    this.refreshOutputSize();
   }
   private measureText=(text:string,fontSize:number)=>{const context=ctx(this.working);context.font=`${fontSize}px sans-serif`;return context.measureText(text).width;};
   private selectionHandle(point:Point) {
@@ -363,22 +462,37 @@ export class ImageEditor extends Modal {
     return closest&&Math.hypot(closest.point.x-point.x,closest.point.y-point.y)<=radius?closest:undefined;
   }
 
+  private get corners() { return this.tool === 'board' ? this.boardCorners : this.cropCorners; }
+  private set corners(points: Point[]) {
+    if (this.tool === 'board') this.boardCorners = points;
+    else this.cropCorners = points;
+  }
+  private fullImageCorners() {
+    return rectangleCorners({x:0,y:0},{x:this.working.width-1,y:this.working.height-1});
+  }
   private resetCorners() {
-    const w=this.working.width-1,h=this.working.height-1;
-    this.corners=[{x:0,y:0},{x:w,y:0},{x:w,y:h},{x:0,y:h}];this.activeCorner=0;
+    this.cropCorners = this.fullImageCorners();
+    this.boardCorners = this.fullImageCorners();
+    this.activeCorner = 0;
   }
   private rectangleFromCorner(i:number) {
     const opposite=this.corners[(i+2)%4],p=this.corners[i];
     this.corners[(i+1)%4]=i%2===0?{x:opposite.x,y:p.y}:{x:p.x,y:opposite.y};
     this.corners[(i+3)%4]=i%2===0?{x:p.x,y:opposite.y}:{x:opposite.x,y:p.y};
   }
-  private position(e:PointerEvent):Point {
+  private position(e:MouseEvent):Point {
     const r=this.preview.getBoundingClientRect();return {x:clamp((e.clientX-r.left)/r.width*this.working.width,0,this.working.width-1),y:clamp((e.clientY-r.top)/r.height*this.working.height,0,this.working.height-1)};
   }
   private pointerDown(e:PointerEvent) {
     if(this.busy||e.button!==0)return;
-    e.preventDefault();this.preview.focus();this.preview.setPointerCapture(e.pointerId);const p=this.position(e);
-    if(this.tool==='crop') {
+    e.preventDefault();this.preview.focus({preventScroll:true});const p=this.position(e);
+    if(this.tool==='annotate'&&this.markTool==='text') {
+      const existing = this.textAt(p);
+      this.startTextEdit(existing ?? {kind:'text',points:[p],color:this.color,width:this.fontSize}, !existing);
+      return;
+    }
+    if(this.tool==='crop'||this.tool==='board') {
+      this.preview.setPointerCapture(e.pointerId);
       const r=this.preview.getBoundingClientRect(),radius=22*this.working.width/r.width;
       let closest=-1,distance=Infinity;this.corners.forEach((c,i)=>{const d=Math.hypot(c.x-p.x,c.y-p.y);if(d<distance){distance=d;closest=i;}});
       if(distance<=radius){this.activeCorner=closest;this.dragging={corner:closest,point:p};}
@@ -386,6 +500,7 @@ export class ImageEditor extends Modal {
       this.draw();return;
     }
     if(this.tool!=='annotate')return;
+    this.preview.setPointerCapture(e.pointerId);
     ++this.sizeVersion;window.clearTimeout(this.estimateTimer);this.invalidateEncodedPreview();
     if(this.markTool==='select') {
       const handle=this.selectionHandle(p);
@@ -397,9 +512,6 @@ export class ImageEditor extends Modal {
       if(this.selected>=0)this.dragging={mark:this.selected,point:p,originalMark:clone(this.marks[this.selected])};
       this.renderControls();this.draw();return;
     }
-    if(this.markTool==='text') {
-      this.askText().then(text=>{if(text&&!this.closed){this.marks.push({kind:'text',points:[p],text,color:this.color,width:this.fontSize});this.selected=this.marks.length-1;this.draw();void this.run(()=>this.exclusive(async()=>{await this.checkpoint();this.refreshOutputSize();}));}});return;
-    }
     const mark:Mark={kind:this.markTool,points:[p,{...p}],color:this.color,width:this.lineWidth};
     this.marks.push(mark);this.selected=this.marks.length-1;this.dragging={mark:this.selected,point:p,drawing:true};this.draw();
   }
@@ -407,10 +519,13 @@ export class ImageEditor extends Modal {
     if(this.busy)return;const p=this.position(e),d=this.dragging;
     if(!d){
       const handle=this.tool==='annotate'&&this.markTool==='select'?this.selectionHandle(p):undefined;
-      this.preview.style.cursor=handle?(handle.id==='nw'||handle.id==='se'?'nwse-resize':handle.id==='ne'||handle.id==='sw'?'nesw-resize':'crosshair'):this.tool==='annotate'&&this.markTool==='select'?'move':'crosshair';return;
+      this.preview.style.cursor=handle?(handle.id==='nw'||handle.id==='se'?'nwse-resize':handle.id==='ne'||handle.id==='sw'?'nesw-resize':'crosshair'):this.tool==='annotate'&&this.markTool==='select'?'move':this.tool==='annotate'&&this.markTool==='text'?'text':'crosshair';return;
     }
-    if(d.corner!==undefined){if(d.rectangle)this.corners=rectangleCorners(d.point,p);else{this.corners[d.corner]=p;if(this.mode==='rectangle')this.rectangleFromCorner(d.corner);}this.draw();this.scheduleBoardPreview();return;}
+    if(d.corner!==undefined){if(d.rectangle)this.corners=rectangleCorners(d.point,p);else{this.corners[d.corner]=p;if(this.tool==='crop')this.rectangleFromCorner(d.corner);}this.draw();this.scheduleBoardPreview();return;}
     if(d.mark!==undefined){
+      const threshold = 2 * this.working.width / this.preview.getBoundingClientRect().width;
+      if (!d.drawing && !d.moved && Math.hypot(p.x - d.point.x, p.y - d.point.y) < threshold) return;
+      d.moved = true;
       const mark=this.marks[d.mark];
       if(d.drawing){if(mark.kind==='pen'||mark.kind==='highlighter')mark.points.push(p);else mark.points[1]=p;}
       else if(d.originalMark){
@@ -423,9 +538,9 @@ export class ImageEditor extends Modal {
     }
   }
   private pointerUp() {
-    const annotation=this.dragging?.mark!==undefined;this.dragging=undefined;
+    const annotation=this.dragging?.mark!==undefined&&(this.dragging.drawing||this.dragging.moved);this.dragging=undefined;
     if(annotation)void this.run(()=>this.exclusive(async()=>{await this.checkpoint();if(this.markTool==='select')this.renderControls();this.refreshOutputSize();}));
-    else if(this.tool==='annotate')this.refreshOutputSize();
+    else if(this.tool==='annotate'&&!this.textEdit)this.refreshOutputSize();
   }
 
   private draw() {
@@ -435,24 +550,25 @@ export class ImageEditor extends Modal {
     const backingScale=Math.min(ratio,4096/Math.max(size.width,size.height));
     this.preview.width=Math.max(1,Math.round(size.width*backingScale));this.preview.height=Math.max(1,Math.round(size.height*backingScale));
     this.preview.style.width=`${size.width}px`;this.preview.style.height=`${size.height}px`;
-    const c=ctx(this.preview);c.scale(this.preview.width/this.working.width,this.preview.height/this.working.height);c.drawImage(this.encodedPreview||this.working,0,0);if(!this.encodedPreview)this.paintMarks(c);
+    const c=ctx(this.preview);c.scale(this.preview.width/this.working.width,this.preview.height/this.working.height);c.drawImage(this.encodedPreview||this.working,0,0);if(!this.encodedPreview)this.paintMarks(c,this.textEdit?.mark);
     const unit=this.working.width/size.width;
-    if(this.tool==='crop') {
+    if(this.tool==='crop'||this.tool==='board') {
       c.beginPath();this.corners.forEach((p,i)=>i===0?c.moveTo(p.x,p.y):c.lineTo(p.x,p.y));c.closePath();c.strokeStyle=isValidQuad(this.corners)?'#00b8ff':'#ff4141';c.lineWidth=2*unit;c.stroke();
       this.corners.forEach((p,i)=>{c.beginPath();c.arc(p.x,p.y,8*unit,0,Math.PI*2);c.fillStyle=i===this.activeCorner?'#ffcc00':'#fff';c.fill();c.strokeStyle='#111';c.lineWidth=unit;c.stroke();c.fillStyle='#111';c.font=`${10*unit}px sans-serif`;c.textAlign='center';c.textBaseline='middle';c.fillText(String(i+1),p.x,p.y);});
       this.drawMagnifier();
     }
-    if(this.tool==='annotate'&&this.selected>=0&&this.marks[this.selected]){
+    if(this.tool==='annotate'&&!this.textEdit&&this.selected>=0&&this.marks[this.selected]){
       const mark=this.marks[this.selected],b=this.bounds(mark);c.strokeStyle='#00b8ff';c.lineWidth=1.5*unit;c.setLineDash([5*unit,4*unit]);c.strokeRect(b.x,b.y,b.w,b.h);c.setLineDash([]);
       if(this.markTool==='select')for(const handle of selectionHandles(mark,b)){c.beginPath();c.arc(handle.point.x,handle.point.y,5*unit,0,Math.PI*2);c.fillStyle='#fff';c.fill();c.strokeStyle='#0077c8';c.stroke();}
     }
+    this.positionTextEdit();
   }
   private drawMagnifier() {
     if(!this.magnifier)return;const p=this.corners[this.activeCorner],c=ctx(this.magnifier);
     c.fillStyle='#777';c.fillRect(0,0,160,120);c.imageSmoothingEnabled=false;c.drawImage(this.working,p.x-20,p.y-15,40,30,0,0,160,120);c.strokeStyle='#ffcc00';c.lineWidth=1;c.beginPath();c.moveTo(80,0);c.lineTo(80,120);c.moveTo(0,60);c.lineTo(160,60);c.stroke();
   }
-  private paintMarks(c:CanvasRenderingContext2D) {
-    for(const mark of this.marks){c.save();c.strokeStyle=mark.color;c.fillStyle=mark.color;c.lineWidth=mark.width;c.lineCap='round';c.lineJoin='round';
+  private paintMarks(c:CanvasRenderingContext2D, omit?:Mark) {
+    for(const mark of this.marks){if(mark===omit)continue;c.save();c.strokeStyle=mark.color;c.fillStyle=mark.color;c.lineWidth=mark.width;c.lineCap='round';c.lineJoin='round';
       const a=mark.points[0],b=mark.points[mark.points.length-1];
       if(mark.kind==='text'){c.translate(a.x,a.y);c.scale(mark.textScaleX??1,1);c.font=`${mark.width}px sans-serif`;c.textBaseline='top';c.fillText(mark.text||'',0,0);}
       else if(mark.kind==='rectangle'){c.strokeRect(a.x,a.y,b.x-a.x,b.y-a.y);}
@@ -467,6 +583,9 @@ export class ImageEditor extends Modal {
 
   private async checkpoint() {
     const blob=await encode(this.working);if(this.closed)return;
+    this.recordSnapshot(blob);
+  }
+  private recordSnapshot(blob: Blob) {
     this.history=this.history.slice(0,this.historyIndex+1);this.history.push({blob,marks:clone(this.marks)});
     while(this.history.length>2&&(this.history.length>12||this.history.reduce((n,s)=>n+s.blob.size,0)>64*1024*1024))this.history.shift();
     this.historyIndex=this.history.length-1;
@@ -491,27 +610,35 @@ export class ImageEditor extends Modal {
     return{width:Math.max(2,Math.round(w)),height:Math.max(2,Math.round(h))};
   }
   private async applyCrop() {
+    if(!isValidQuad(this.corners))throw new Error('Choose a rectangle enclosing a usable area.');
+    const xs=this.corners.map(p=>p.x),ys=this.corners.map(p=>p.y),x=Math.round(Math.min(...xs)),y=Math.round(Math.min(...ys)),w=Math.round(Math.max(...xs))-x+1,h=Math.round(Math.max(...ys))-y+1;
+    const out=canvas(w,h);ctx(out).drawImage(this.composite(),x,y,w,h,0,0,w,h);await this.replaceRaster(out);
+  }
+
+  private boardProcessing() {
+    return {
+      mode: this.boardBackground === 'white' ? 'whiteboard' as const : 'blackboard' as const,
+      strength: this.strength,
+      adjustments: this.boardSaturation ? { saturation: this.boardSaturation } : undefined,
+    };
+  }
+
+  private async applyBoard() {
     if(!isValidQuad(this.corners))throw new Error('Choose four non-crossing corners enclosing a usable area.');
-    const src=this.composite();
-    if(this.mode==='rectangle'){
-      const xs=this.corners.map(p=>p.x),ys=this.corners.map(p=>p.y),x=Math.round(Math.min(...xs)),y=Math.round(Math.min(...ys)),w=Math.round(Math.max(...xs))-x+1,h=Math.round(Math.max(...ys))-y+1;
-      const out=canvas(w,h);ctx(out).drawImage(src,x,y,w,h,0,0,w,h);await this.replaceRaster(out);return;
-    }
     const size=this.boardSize();canvas(size.width,size.height); // Validate before worker allocation.
+    const src=this.composite();
     const data=ctx(src).getImageData(0,0,src.width,src.height);
-    this.status.setText('Correcting perspective and enhancing board…');
-    const result=await this.process({data:data.data.buffer,width:src.width,height:src.height,corners:this.corners,outWidth:size.width,outHeight:size.height,mode:this.boardBackground==='white'?'whiteboard':'blackboard',strength:this.strength});
+    this.status.setText('Applying board correction…');
+    const result=await this.process({data:data.data.buffer,width:src.width,height:src.height,corners:this.corners,outWidth:size.width,outHeight:size.height,...this.boardProcessing()});
     if(this.closed)return;
     const out=canvas(result.width,result.height);ctx(out).putImageData(new ImageData(new Uint8ClampedArray(result.data),result.width,result.height),0,0);await this.replaceRaster(out);
   }
 
   private scheduleBoardPreview() {
     window.clearTimeout(this.previewTimer);const version=++this.previewVersion;
-    if(this.mode==='rectangle'||!this.boardPreview)return;
+    if(this.tool!=='board'||!this.boardPreview)return;
     this.previewTimer=window.setTimeout(()=>void this.run(async()=>{
-      if(this.closed||this.busy||this.previewRunning||!isValidQuad(this.corners))return;
-      if(this.mode==='rectangle')return;
-      const mode=this.boardBackground==='white'?'whiteboard':'blackboard';
+      if(this.closed||this.busy||this.tool!=='board'||this.previewRunning||!isValidQuad(this.corners))return;
       this.previewRunning=true;
       try {
       const scale=Math.min(1,900/Math.max(this.working.width,this.working.height));
@@ -519,7 +646,7 @@ export class ImageEditor extends Modal {
       const c=ctx(src);c.scale(src.width/this.working.width,src.height/this.working.height);c.drawImage(this.working,0,0);this.paintMarks(c);
       const points=this.corners.map(p=>({x:p.x*(src.width-1)/Math.max(1,this.working.width-1),y:p.y*(src.height-1)/Math.max(1,this.working.height-1)}));
       const size=this.boardSize(),s=Math.min(1,700/Math.max(size.width,size.height));
-      const result=await this.process({data:ctx(src).getImageData(0,0,src.width,src.height).data.buffer,width:src.width,height:src.height,corners:points,outWidth:Math.max(2,Math.round(size.width*s)),outHeight:Math.max(2,Math.round(size.height*s)),mode,strength:this.strength});
+      const result=await this.process({data:ctx(src).getImageData(0,0,src.width,src.height).data.buffer,width:src.width,height:src.height,corners:points,outWidth:Math.max(2,Math.round(size.width*s)),outHeight:Math.max(2,Math.round(size.height*s)),...this.boardProcessing()});
       if(version!==this.previewVersion||this.closed||!this.boardPreview)return;
       this.boardPreview.width=result.width;this.boardPreview.height=result.height;ctx(this.boardPreview).putImageData(new ImageData(new Uint8ClampedArray(result.data),result.width,result.height),0,0);
       } finally { this.previewRunning=false; if(!this.closed&&version!==this.previewVersion)this.scheduleBoardPreview(); }
@@ -574,11 +701,11 @@ export class ImageEditor extends Modal {
     this.estimateTimer=window.setTimeout(()=>void this.run(()=>this.estimateOutput()),300);
   }
   private async estimateOutput() {
-    if(this.closed||this.dragging)return;
+    if(this.closed||this.dragging||this.textEdit)return;
     if(this.estimating){this.estimateAgain=true;return;}
     this.estimating=true;
     try {do {
-      if(this.dragging)return;
+      if(this.dragging||this.textEdit)return;
       this.estimateAgain=false;const version=this.sizeVersion;
       const blob=await this.outputBlob();if(this.closed)return;
       if(version!==this.sizeVersion){this.estimateAgain=true;continue;}
@@ -601,10 +728,6 @@ export class ImageEditor extends Modal {
     const row=modal.contentEl.createDiv('image-toolkit-comparison');
     ['Original','Output'].forEach((text,i)=>{const col=row.createDiv();col.createEl('h3',{text});col.createEl('img',{attr:{src:urls[i],alt:text}});});
     this.childModals.add(modal);modal.onClose=()=>{this.childModals.delete(modal);urls.forEach(url=>URL.revokeObjectURL(url));};modal.open();
-  }
-  private askText(initial=''):Promise<string|null> {
-    return new Promise(resolve=>{const modal=new Modal(this.app);modal.titleEl.setText('Annotation text');const input=modal.contentEl.createEl('input',{type:'text',value:initial,attr:{placeholder:'Enter text','aria-label':'Annotation text'}});let result:string|null=null;
-      const add=modal.contentEl.createEl('button',{text:initial?'Apply text':'Add text',cls:'mod-cta'});const submit=()=>{result=input.value.trim();modal.close();};add.onclick=submit;input.onkeydown=e=>{if(e.key==='Enter')submit();};this.childModals.add(modal);modal.onClose=()=>{this.childModals.delete(modal);resolve(result);};modal.open();input.focus();});
   }
   private async prepareBackupPreferences():Promise<boolean> {
     const current=this.options.getBackupPreferences?.()||{backupEnabled:this.options.backupEnabled,backupFolder:this.options.backupFolder,backupConfigured:this.options.backupConfigured===true};

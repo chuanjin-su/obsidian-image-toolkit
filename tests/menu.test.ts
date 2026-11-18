@@ -51,7 +51,7 @@ test('image menu has exactly one Edit image item, deduplicated per menu',async()
   const context={file:{path:'photo.jpg'}};p.open=(...args:any[])=>opens.push(args);
   p.addMenu(m.menu,context);p.addMenu(m.menu,context);
   assert.equal(m.items.length,1);assert.equal(m.items[0].title,'Edit image');assert.equal(m.separators,1);
-  m.items[0].click();assert.equal(opens.length,1);assert.equal(opens[0][0],context);assert.equal(opens[0][1],'compress');
+  m.items[0].click();assert.equal(opens.length,1);assert.equal(opens[0][0],context);assert.equal(opens[0][1],'resize');
 });
 
 test('enabled backups add Recover image immediately below Edit image exactly once',async()=>{

@@ -20,6 +20,7 @@ const publish=async(path:string,output:ArrayBuffer)=>{const response=await fetch
 await publish(source.path,bytes);source.stat.size=bytes.byteLength;
 g.saved=[];g.workerFileReads=[];
 const app:any={
+  keymap:{pushScope(){},popScope(){}},
   vault:{
     getAbstractFileByPath:(p:string)=>files.get(p)||null,
     getResourcePath:(f:any)=>resourcePath(f.path),
@@ -36,7 +37,7 @@ const app:any={
 g.sourceBytes=bytes;g.data=data;g.app=app;g.files=files;g.ImageRecovery=ImageRecovery;
 g.preferences={backupEnabled:false,backupFolder:'Backups/Images',backupConfigured:false};g.preferenceWrites=[];
 g.editorOptions={
-  tool:'crop',quality:85,backupEnabled:false,backupFolder:'Backups/Images',backupConfigured:false,
+  tool:'resize',quality:85,backupEnabled:false,backupFolder:'Backups/Images',backupConfigured:false,
   getBackupPreferences:()=>({...g.preferences}),
   saveBackupPreferences:async(preferences:any)=>{g.preferences={...preferences,backupConfigured:true};g.preferenceWrites.push({...g.preferences});}
 };

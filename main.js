@@ -785,10 +785,11 @@ var ImageEditor = class extends import_obsidian2.Modal {
     this.file = file;
     this.options = options;
     this.didClose = didClose;
-    this.mode = "rectangle";
-    this.corners = [];
+    this.cropCorners = [];
+    this.boardCorners = [];
     this.activeCorner = 0;
     this.strength = 0;
+    this.boardSaturation = 0;
     this.boardBackground = "white";
     this.marks = [];
     this.markTool = "pen";
@@ -845,6 +846,7 @@ var ImageEditor = class extends import_obsidian2.Modal {
   }
   onClose() {
     this.closed = true;
+    this.finishTextEdit(false);
     for (const modal of this.childModals) modal.close();
     this.childModals.clear();
     window.clearTimeout(this.previewTimer);
@@ -861,7 +863,9 @@ var ImageEditor = class extends import_obsidian2.Modal {
     const b = parent.createEl("button", { text });
     if (primary) b.addClass("mod-cta");
     b.addEventListener("click", () => {
-      if (!this.busy) void this.run(action);
+      if (this.busy) return;
+      this.finishTextEdit(true);
+      void this.run(action);
     });
     return b;
   }
@@ -897,14 +901,14 @@ var ImageEditor = class extends import_obsidian2.Modal {
     this.contentEl.empty();
     const toolbar = this.contentEl.createDiv("image-toolkit-toolbar");
     const tabs = toolbar.createDiv("image-toolkit-tool-tabs");
-    for (const [id, title] of [["compress", "Compress"], ["resize", "Resize"], ["crop", "Crop / board"], ["adjust", "Adjust"], ["annotate", "Annotate"]]) {
+    for (const [id, title] of [["resize", "Resize"], ["crop", "Crop"], ["board", "Board"], ["adjust", "Adjust"], ["annotate", "Annotate"]]) {
       const b = this.button(tabs, title, () => this.selectTool(id));
       b.dataset.tool = id;
     }
     const history = toolbar.createDiv("image-toolkit-history");
-    this.button(history, "Undo", () => this.restore(-1));
-    this.button(history, "Redo", () => this.restore(1));
-    this.button(history, "Reset", () => this.exclusive(async () => {
+    this.historyButton(history, "undo-2", "Undo", "Undo", () => this.restore(-1));
+    this.historyButton(history, "redo-2", "Redo", "Redo", () => this.restore(1));
+    this.historyButton(history, "rotate-ccw", "Reset", "Reset to original", () => this.exclusive(async () => {
       this.adjustments = { ...DEFAULT_ADJUSTMENTS };
       ++this.sizeVersion;
       window.clearTimeout(this.estimateTimer);
@@ -917,9 +921,9 @@ var ImageEditor = class extends import_obsidian2.Modal {
       this.draw();
       this.refreshOutputSize();
     }));
-    this.button(history, "Compare", () => this.compare()).title = "Before / after with the current quality";
-    this.layout = this.contentEl.createDiv("image-toolkit-layout");
-    const viewport = this.layout.createDiv("image-toolkit-viewport");
+    this.historyButton(history, "columns-2", "Compare", "Compare original and output", () => this.compare());
+    const layout = this.contentEl.createDiv("image-toolkit-layout");
+    const viewport = layout.createDiv("image-toolkit-viewport");
     const zoomBar = viewport.createDiv("image-toolkit-zoom");
     this.range(zoomBar, "Zoom", 25, 300, this.zoom, 5, (value) => {
       this.zoom = value;
@@ -927,12 +931,17 @@ var ImageEditor = class extends import_obsidian2.Modal {
     }).title = "100% fits both dimensions; scroll to pan above 100%";
     this.previewCaption = zoomBar.createDiv("image-toolkit-preview-caption");
     this.scroll = viewport.createDiv("image-toolkit-scroll");
-    const stage = this.scroll.createDiv("image-toolkit-stage");
-    this.preview = stage.createEl("canvas", { attr: { tabindex: "0", "aria-label": "Image editing canvas. Drag crop handles; arrow keys nudge the selected corner." } });
+    this.stage = this.scroll.createDiv("image-toolkit-stage");
+    this.preview = this.stage.createEl("canvas", { attr: { tabindex: "0", "aria-label": "Image editing canvas" } });
     this.preview.addEventListener("pointerdown", (e) => this.pointerDown(e));
     this.preview.addEventListener("pointermove", (e) => this.pointerMove(e));
     this.preview.addEventListener("pointerup", () => this.pointerUp());
     this.preview.addEventListener("pointercancel", () => this.pointerUp());
+    this.preview.addEventListener("dblclick", (e) => {
+      if (this.tool !== "annotate" || this.markTool !== "select" || this.busy) return;
+      const mark = this.textAt(this.position(e));
+      if (mark) this.startTextEdit(mark, false);
+    });
     this.preview.addEventListener("keydown", (e) => {
       if (this.busy) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
@@ -943,17 +952,21 @@ var ImageEditor = class extends import_obsidian2.Modal {
         e.preventDefault();
         void this.run(() => this.removeSelected());
       }
-      if (this.tool === "crop" && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) {
+      if (this.tool === "annotate" && e.key === "Enter" && this.marks[this.selected]?.kind === "text") {
+        e.preventDefault();
+        this.startTextEdit(this.marks[this.selected], false);
+      }
+      if ((this.tool === "crop" || this.tool === "board") && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) {
         e.preventDefault();
         const p = this.corners[this.activeCorner], d = e.shiftKey ? 10 : 1;
         p.x = clamp(p.x + (e.key === "ArrowRight" ? d : e.key === "ArrowLeft" ? -d : 0), 0, this.working.width - 1);
         p.y = clamp(p.y + (e.key === "ArrowDown" ? d : e.key === "ArrowUp" ? -d : 0), 0, this.working.height - 1);
-        if (this.mode === "rectangle") this.rectangleFromCorner(this.activeCorner);
+        if (this.tool === "crop") this.rectangleFromCorner(this.activeCorner);
         this.draw();
         this.scheduleBoardPreview();
       }
     });
-    const sidebar = this.layout.createDiv("image-toolkit-sidebar");
+    const sidebar = layout.createDiv("image-toolkit-sidebar");
     this.controls = sidebar.createDiv("image-toolkit-controls");
     this.toolActions = sidebar.createDiv("image-toolkit-tool-actions");
     const footer = this.contentEl.createDiv("image-toolkit-footer");
@@ -968,7 +981,7 @@ var ImageEditor = class extends import_obsidian2.Modal {
     this.status = exportInfo.createDiv("image-toolkit-status");
     this.status.setAttribute("role", "status");
     this.status.setText(`Original ${this.bytes(this.original.byteLength)} \xB7 replaces original \xB7 backup ${this.options.backupEnabled ? "on" : "off"}`);
-    this.status.title = `Apply crop/resize before saving. Pending photo adjustments are included automatically. All notes using this image are affected. ${this.options.backupEnabled ? `Backups: ${this.options.backupFolder}` : "Backups disabled in plugin settings."}`;
+    this.status.title = `Apply Resize, Crop, or Board before saving. Pending photo adjustments are included automatically. All notes using this image are affected. ${this.options.backupEnabled ? `Backups: ${this.options.backupFolder}` : "Backups disabled in plugin settings."}`;
     const saveActions = footer.createDiv("image-toolkit-save-actions");
     this.button(saveActions, "Cancel", () => this.close());
     this.button(saveActions, "Save image", () => this.save(), true).title = `Replace ${this.file.path}. ${this.options.backupEnabled ? `Back up to ${this.options.backupFolder} first.` : "Backups are disabled."}`;
@@ -976,6 +989,12 @@ var ImageEditor = class extends import_obsidian2.Modal {
     this.resizeObserver = new ResizeObserver(() => this.draw());
     this.resizeObserver.observe(this.scroll);
     this.renderControls();
+  }
+  historyButton(parent, icon, label, tooltip, action) {
+    const button = this.button(parent, "", action);
+    (0, import_obsidian2.setIcon)(button, icon);
+    button.setAttribute("aria-label", label);
+    button.title = tooltip;
   }
   label(parent, text) {
     return parent.createEl("label", { text, cls: "image-toolkit-field" });
@@ -1027,21 +1046,24 @@ var ImageEditor = class extends import_obsidian2.Modal {
     this.toolActions.empty();
     this.boardPreview = void 0;
     this.magnifier = void 0;
-    this.layout.toggleClass("image-toolkit-image-only", this.tool === "compress");
     this.contentEl.querySelectorAll("[data-tool]").forEach((el) => {
       el.toggleClass("is-active", el.dataset.tool === this.tool);
       el.setAttribute("aria-pressed", String(el.dataset.tool === this.tool));
     });
     if (this.tool === "resize") this.resizeControls();
     if (this.tool === "crop") this.cropControls();
+    if (this.tool === "board") this.boardControls();
     if (this.tool === "annotate") this.annotationControls();
     if (this.tool === "adjust") this.adjustmentControls();
     if (this.busy) this.setEnabled(false);
   }
   async selectTool(tool) {
-    if (tool !== this.tool && hasAdjustments(this.adjustments)) await this.applyAdjustments();
+    if (tool === this.tool) return;
+    if (hasAdjustments(this.adjustments)) await this.applyAdjustments();
     if (this.closed || this.busy) return;
+    this.dragging = void 0;
     this.tool = tool;
+    this.activeCorner = 0;
     this.selected = -1;
     this.renderControls();
     this.draw();
@@ -1125,72 +1147,76 @@ var ImageEditor = class extends import_obsidian2.Modal {
     }), true);
   }
   cropControls() {
-    let inspectors = this.controls;
-    this.select(this.controls, "Mode", { rectangle: "Rectangle crop", board: "Board" }, this.mode, (v) => {
-      this.mode = v;
-      this.renderControls();
+    this.controls.createDiv({ text: "Drag to draw a crop", cls: "image-toolkit-hint" }).title = "Arrow keys nudge a corner by one pixel. Hold Shift to nudge by ten pixels.";
+    this.select(this.controls, "Aspect preset", { free: "Free", square: "1:1", landscape: "4:3", wide: "16:9", portrait: "3:4" }, "free", (v) => {
+      const ratio = { square: 1, landscape: 4 / 3, wide: 16 / 9, portrait: 3 / 4 }[v];
+      if (!ratio) return;
+      let w = this.working.width - 1, h = w / ratio;
+      if (h > this.working.height - 1) {
+        h = this.working.height - 1;
+        w = h * ratio;
+      }
+      const x = (this.working.width - 1 - w) / 2, y = (this.working.height - 1 - h) / 2;
+      this.corners = [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
       this.draw();
-    }).title = "Drag to draw a rectangle, then refine corners. Arrow keys nudge; Apply commits the crop.";
-    this.controls.createDiv({ text: "Drag to select \xB7 refine corners", cls: "image-toolkit-hint" }).title = "Drag away from a handle to draw a rectangle. Drag handles independently in Board mode. Arrow keys: 1px; Shift+arrow: 10px. Apply before Save.";
-    if (this.mode === "rectangle") {
-      this.select(this.controls, "Aspect preset", { free: "Free", square: "1:1", landscape: "4:3", wide: "16:9", portrait: "3:4" }, "free", (v) => {
-        const ratio = { square: 1, landscape: 4 / 3, wide: 16 / 9, portrait: 3 / 4 }[v];
-        if (!ratio) return;
-        let w = this.working.width - 1, h = w / ratio;
-        if (h > this.working.height - 1) {
-          h = this.working.height - 1;
-          w = h * ratio;
-        }
-        const x = (this.working.width - 1 - w) / 2, y = (this.working.height - 1 - h) / 2;
-        this.corners = [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
-        this.draw();
-      });
-      this.controls.title = "Aspect presets start a centered crop; subsequent dragging remains freeform.";
-    } else {
-      const background = this.select(this.controls, "Background", { white: "White", black: "Black" }, this.boardBackground, (v) => {
-        this.boardBackground = v;
-        this.scheduleBoardPreview();
-      });
-      background.setAttribute("aria-label", "Board background");
-      background.title = "White: dark writing. Black: light writing.";
-      this.range(this.controls, "Enhance", 0, 100, Math.round(this.strength * 100), 1, (v) => {
-        this.strength = v / 100;
-        this.scheduleBoardPreview();
-      }).title = "0 leaves the rectified image unchanged; higher values clean the background and strengthen writing.";
-      inspectors = this.controls.createDiv("image-toolkit-crop-previews");
-      const board = inspectors.createDiv();
-      board.createDiv({ text: "Board preview", cls: "image-toolkit-inspector-label" });
-      this.boardPreview = board.createEl("canvas", { cls: "image-toolkit-board-preview", attr: { "aria-label": "Rectified board preview" } });
+    }).title = "Aspect presets start a centered crop. Drag the corners to refine it.";
+    this.cornerPrecision(this.controls);
+    this.selectionActions("Apply crop", () => this.applyCrop());
+  }
+  boardControls() {
+    this.controls.createDiv({ text: "Align the four board corners", cls: "image-toolkit-hint" }).title = "Arrow keys nudge the selected corner. Hold Shift to nudge by ten pixels.";
+    const background = this.select(this.controls, "Background", { white: "White", black: "Black" }, this.boardBackground, (v) => {
+      this.boardBackground = v;
       this.scheduleBoardPreview();
-    }
+    });
+    background.setAttribute("aria-label", "Board background");
+    background.title = "White for dark writing. Black for light writing.";
+    this.range(this.controls, "Enhance", 0, 100, Math.round(this.strength * 100), 1, (v) => {
+      this.strength = v / 100;
+      this.scheduleBoardPreview();
+    }).title = "Clean the background and strengthen writing.";
+    this.range(this.controls, "Saturation", -100, 100, this.boardSaturation, 1, (v) => {
+      this.boardSaturation = v;
+      this.scheduleBoardPreview();
+    }).title = "Adjust color intensity after board enhancement.";
+    const inspectors = this.controls.createDiv("image-toolkit-crop-previews");
+    const board = inspectors.createDiv();
+    board.createDiv({ text: "Board preview", cls: "image-toolkit-inspector-label" });
+    this.boardPreview = board.createEl("canvas", { cls: "image-toolkit-board-preview", attr: { "aria-label": "Rectified board preview" } });
+    this.cornerPrecision(inspectors);
+    const output = this.details(this.controls, "Output size");
+    this.number(output, "Width", this.boardWidth, (value) => {
+      this.boardWidth = value;
+      this.scheduleBoardPreview();
+    }, 0).title = "Output pixels. Set one dimension to preserve the estimated ratio, or use 0 for automatic sizing.";
+    this.number(output, "Height", this.boardHeight, (value) => {
+      this.boardHeight = value;
+      this.scheduleBoardPreview();
+    }, 0).title = "Output pixels. Use 0 for automatic sizing.";
+    this.selectionActions("Apply board", () => this.applyBoard());
+    this.scheduleBoardPreview();
+  }
+  cornerPrecision(inspectors) {
     const precision = this.details(inspectors, "Corner precision", true);
     this.magnifier = precision.createEl("canvas", { cls: "image-toolkit-magnifier", attr: { "aria-label": "Selected corner magnifier" } });
     this.magnifier.width = 160;
     this.magnifier.height = 120;
-    if (this.mode === "board") {
-      const output = this.details(this.controls, "Output size");
-      this.number(output, "Width", this.boardWidth, (value) => {
-        this.boardWidth = value;
-        this.scheduleBoardPreview();
-      }, 0).title = "Output pixels; 0 = automatic. Set one dimension to preserve the estimated ratio.";
-      this.number(output, "Height", this.boardHeight, (value) => {
-        this.boardHeight = value;
-        this.scheduleBoardPreview();
-      }, 0).title = "Output pixels; 0 = automatic.";
-    }
+  }
+  selectionActions(label, apply) {
     const cropActions = this.toolActions.createDiv("image-toolkit-crop-actions");
     this.button(cropActions, "Reset corners", () => {
-      this.resetCorners();
+      this.corners = this.fullImageCorners();
+      this.activeCorner = 0;
       this.draw();
       this.scheduleBoardPreview();
     });
-    this.button(cropActions, "Apply crop", () => this.exclusive(() => this.applyCrop()), true).setAttribute("aria-label", "Apply crop / board correction");
+    this.button(cropActions, label, () => this.exclusive(apply), true);
     const transforms = this.toolActions.createDiv("image-toolkit-transform");
     const actions = [["\u21B6", "left", "Rotate left 90\xB0"], ["\u21B7", "right", "Rotate right 90\xB0"], ["\u2194", "horizontal", "Flip horizontally"], ["\u2195", "vertical", "Flip vertically"]];
-    for (const [icon, kind, label] of actions) {
+    for (const [icon, kind, label2] of actions) {
       const button = this.button(transforms, icon, () => this.transform(kind));
-      button.title = label;
-      button.setAttribute("aria-label", label);
+      button.title = label2;
+      button.setAttribute("aria-label", label2);
     }
   }
   annotationControls() {
@@ -1246,21 +1272,81 @@ var ImageEditor = class extends import_obsidian2.Modal {
       });
       input.addEventListener("change", commit);
     }
-    this.controls.createDiv({ text: this.markTool === "select" ? "Drag to move \xB7 handles to reshape" : "Drag to draw \xB7 click for text", cls: "image-toolkit-hint" }).title = "Select a mark to move, resize or change its style. Arrows have endpoint handles. Text can also be edited. Delete removes the selection.";
-    if (mark?.kind === "text") this.button(this.toolActions, "Edit text", () => this.editSelectedText());
+    const hint = this.markTool === "select" ? "Drag to move. Double-click text to edit." : this.markTool === "text" ? "Click the image to type." : "Drag on the image to draw.";
+    this.controls.createDiv({ text: hint, cls: "image-toolkit-hint" });
+    if (mark?.kind === "text") this.button(this.toolActions, "Edit text", () => this.startTextEdit(mark, false));
     this.button(this.toolActions, "Delete selected", () => this.removeSelected());
   }
-  async editSelectedText() {
-    const index = this.selected, mark = this.marks[index];
-    if (mark?.kind !== "text") return;
-    const text = await this.askText(mark.text || "");
-    if (!text || this.closed || this.marks[index] !== mark) return;
-    await this.exclusive(async () => {
-      mark.text = text;
-      await this.checkpoint();
-      this.renderControls();
-      this.refreshOutputSize();
+  textAt(point) {
+    const tolerance = 4 * this.working.width / this.preview.getBoundingClientRect().width;
+    for (let index = this.marks.length - 1; index >= 0; index--) {
+      const mark = this.marks[index];
+      if (mark.kind === "text" && hitTestMark(mark, point, tolerance, this.measureText)) return mark;
+    }
+  }
+  startTextEdit(mark, isNew) {
+    if (this.busy || this.closed) return;
+    this.finishTextEdit(true);
+    this.selected = isNew ? -1 : this.marks.indexOf(mark);
+    const input = this.stage.createEl("input", {
+      type: "text",
+      cls: "image-toolkit-inline-text",
+      value: mark.text ?? "",
+      attr: { placeholder: "Type text", "aria-label": "Annotation text", title: "Enter to apply, Escape to cancel" }
     });
+    const scope = new import_obsidian2.Scope(this.scope);
+    scope.register([], "Escape", (event) => {
+      if (event.isComposing) return;
+      this.finishTextEdit(false);
+      this.preview.focus({ preventScroll: true });
+      return false;
+    });
+    this.textEdit = { input, mark, isNew, scope };
+    this.app.keymap.pushScope(scope);
+    input.addEventListener("input", () => this.positionTextEdit());
+    input.addEventListener("blur", () => this.finishTextEdit(true));
+    input.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.key !== "Enter" && event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.finishTextEdit(event.key === "Enter");
+      this.preview.focus({ preventScroll: true });
+    });
+    ++this.sizeVersion;
+    window.clearTimeout(this.estimateTimer);
+    this.invalidateEncodedPreview();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  positionTextEdit() {
+    const edit = this.textEdit;
+    if (!edit) return;
+    const { input, mark } = edit;
+    const [anchor] = mark.points;
+    const scaleX = this.preview.clientWidth / this.working.width;
+    const scaleY = this.preview.clientHeight / this.working.height;
+    const font = clamp(mark.width * scaleY, 14, 68);
+    const width = Math.min(this.stage.clientWidth, Math.max(100, this.measureText(input.value, font) + 22));
+    input.style.fontSize = `${font}px`;
+    input.style.width = `${width}px`;
+    input.style.left = `${clamp(this.preview.offsetLeft + anchor.x * scaleX, 0, this.stage.clientWidth - width)}px`;
+    input.style.top = `${clamp(this.preview.offsetTop + anchor.y * scaleY, 0, Math.max(0, this.stage.clientHeight - input.offsetHeight))}px`;
+  }
+  finishTextEdit(commit) {
+    const edit = this.textEdit;
+    if (!edit) return;
+    this.textEdit = void 0;
+    this.app.keymap.popScope(edit.scope);
+    const text = edit.input.value.trim();
+    edit.input.remove();
+    if (this.closed) return;
+    if (commit && text && text !== edit.mark.text) {
+      edit.mark.text = text;
+      if (edit.isNew) this.marks.push(edit.mark);
+      this.selected = this.marks.indexOf(edit.mark);
+      this.recordSnapshot(this.history[this.historyIndex].blob);
+    }
+    this.refreshOutputSize();
   }
   selectionHandle(point) {
     const mark = this.marks[this.selected];
@@ -1270,9 +1356,19 @@ var ImageEditor = class extends import_obsidian2.Modal {
     const closest = handles.reduce((best, handle) => !best || Math.hypot(handle.point.x - point.x, handle.point.y - point.y) < Math.hypot(best.point.x - point.x, best.point.y - point.y) ? handle : best, void 0);
     return closest && Math.hypot(closest.point.x - point.x, closest.point.y - point.y) <= radius ? closest : void 0;
   }
+  get corners() {
+    return this.tool === "board" ? this.boardCorners : this.cropCorners;
+  }
+  set corners(points) {
+    if (this.tool === "board") this.boardCorners = points;
+    else this.cropCorners = points;
+  }
+  fullImageCorners() {
+    return rectangleCorners({ x: 0, y: 0 }, { x: this.working.width - 1, y: this.working.height - 1 });
+  }
   resetCorners() {
-    const w = this.working.width - 1, h = this.working.height - 1;
-    this.corners = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }];
+    this.cropCorners = this.fullImageCorners();
+    this.boardCorners = this.fullImageCorners();
     this.activeCorner = 0;
   }
   rectangleFromCorner(i) {
@@ -1287,10 +1383,15 @@ var ImageEditor = class extends import_obsidian2.Modal {
   pointerDown(e) {
     if (this.busy || e.button !== 0) return;
     e.preventDefault();
-    this.preview.focus();
-    this.preview.setPointerCapture(e.pointerId);
+    this.preview.focus({ preventScroll: true });
     const p = this.position(e);
-    if (this.tool === "crop") {
+    if (this.tool === "annotate" && this.markTool === "text") {
+      const existing = this.textAt(p);
+      this.startTextEdit(existing ?? { kind: "text", points: [p], color: this.color, width: this.fontSize }, !existing);
+      return;
+    }
+    if (this.tool === "crop" || this.tool === "board") {
+      this.preview.setPointerCapture(e.pointerId);
       const r = this.preview.getBoundingClientRect(), radius = 22 * this.working.width / r.width;
       let closest = -1, distance = Infinity;
       this.corners.forEach((c, i) => {
@@ -1312,6 +1413,7 @@ var ImageEditor = class extends import_obsidian2.Modal {
       return;
     }
     if (this.tool !== "annotate") return;
+    this.preview.setPointerCapture(e.pointerId);
     ++this.sizeVersion;
     window.clearTimeout(this.estimateTimer);
     this.invalidateEncodedPreview();
@@ -1341,20 +1443,6 @@ var ImageEditor = class extends import_obsidian2.Modal {
       this.draw();
       return;
     }
-    if (this.markTool === "text") {
-      this.askText().then((text) => {
-        if (text && !this.closed) {
-          this.marks.push({ kind: "text", points: [p], text, color: this.color, width: this.fontSize });
-          this.selected = this.marks.length - 1;
-          this.draw();
-          void this.run(() => this.exclusive(async () => {
-            await this.checkpoint();
-            this.refreshOutputSize();
-          }));
-        }
-      });
-      return;
-    }
     const mark = { kind: this.markTool, points: [p, { ...p }], color: this.color, width: this.lineWidth };
     this.marks.push(mark);
     this.selected = this.marks.length - 1;
@@ -1366,20 +1454,23 @@ var ImageEditor = class extends import_obsidian2.Modal {
     const p = this.position(e), d = this.dragging;
     if (!d) {
       const handle = this.tool === "annotate" && this.markTool === "select" ? this.selectionHandle(p) : void 0;
-      this.preview.style.cursor = handle ? handle.id === "nw" || handle.id === "se" ? "nwse-resize" : handle.id === "ne" || handle.id === "sw" ? "nesw-resize" : "crosshair" : this.tool === "annotate" && this.markTool === "select" ? "move" : "crosshair";
+      this.preview.style.cursor = handle ? handle.id === "nw" || handle.id === "se" ? "nwse-resize" : handle.id === "ne" || handle.id === "sw" ? "nesw-resize" : "crosshair" : this.tool === "annotate" && this.markTool === "select" ? "move" : this.tool === "annotate" && this.markTool === "text" ? "text" : "crosshair";
       return;
     }
     if (d.corner !== void 0) {
       if (d.rectangle) this.corners = rectangleCorners(d.point, p);
       else {
         this.corners[d.corner] = p;
-        if (this.mode === "rectangle") this.rectangleFromCorner(d.corner);
+        if (this.tool === "crop") this.rectangleFromCorner(d.corner);
       }
       this.draw();
       this.scheduleBoardPreview();
       return;
     }
     if (d.mark !== void 0) {
+      const threshold = 2 * this.working.width / this.preview.getBoundingClientRect().width;
+      if (!d.drawing && !d.moved && Math.hypot(p.x - d.point.x, p.y - d.point.y) < threshold) return;
+      d.moved = true;
       const mark = this.marks[d.mark];
       if (d.drawing) {
         if (mark.kind === "pen" || mark.kind === "highlighter") mark.points.push(p);
@@ -1396,14 +1487,14 @@ var ImageEditor = class extends import_obsidian2.Modal {
     }
   }
   pointerUp() {
-    const annotation = this.dragging?.mark !== void 0;
+    const annotation = this.dragging?.mark !== void 0 && (this.dragging.drawing || this.dragging.moved);
     this.dragging = void 0;
     if (annotation) void this.run(() => this.exclusive(async () => {
       await this.checkpoint();
       if (this.markTool === "select") this.renderControls();
       this.refreshOutputSize();
     }));
-    else if (this.tool === "annotate") this.refreshOutputSize();
+    else if (this.tool === "annotate" && !this.textEdit) this.refreshOutputSize();
   }
   draw() {
     if (!this.preview || !this.working || this.closed) return;
@@ -1417,9 +1508,9 @@ var ImageEditor = class extends import_obsidian2.Modal {
     const c = ctx(this.preview);
     c.scale(this.preview.width / this.working.width, this.preview.height / this.working.height);
     c.drawImage(this.encodedPreview || this.working, 0, 0);
-    if (!this.encodedPreview) this.paintMarks(c);
+    if (!this.encodedPreview) this.paintMarks(c, this.textEdit?.mark);
     const unit = this.working.width / size.width;
-    if (this.tool === "crop") {
+    if (this.tool === "crop" || this.tool === "board") {
       c.beginPath();
       this.corners.forEach((p, i) => i === 0 ? c.moveTo(p.x, p.y) : c.lineTo(p.x, p.y));
       c.closePath();
@@ -1442,7 +1533,7 @@ var ImageEditor = class extends import_obsidian2.Modal {
       });
       this.drawMagnifier();
     }
-    if (this.tool === "annotate" && this.selected >= 0 && this.marks[this.selected]) {
+    if (this.tool === "annotate" && !this.textEdit && this.selected >= 0 && this.marks[this.selected]) {
       const mark = this.marks[this.selected], b = this.bounds(mark);
       c.strokeStyle = "#00b8ff";
       c.lineWidth = 1.5 * unit;
@@ -1458,6 +1549,7 @@ var ImageEditor = class extends import_obsidian2.Modal {
         c.stroke();
       }
     }
+    this.positionTextEdit();
   }
   drawMagnifier() {
     if (!this.magnifier) return;
@@ -1475,8 +1567,9 @@ var ImageEditor = class extends import_obsidian2.Modal {
     c.lineTo(160, 60);
     c.stroke();
   }
-  paintMarks(c) {
+  paintMarks(c, omit) {
     for (const mark of this.marks) {
+      if (mark === omit) continue;
       c.save();
       c.strokeStyle = mark.color;
       c.fillStyle = mark.color;
@@ -1543,6 +1636,9 @@ var ImageEditor = class extends import_obsidian2.Modal {
   async checkpoint() {
     const blob = await encode(this.working);
     if (this.closed) return;
+    this.recordSnapshot(blob);
+  }
+  recordSnapshot(blob) {
     this.history = this.history.slice(0, this.historyIndex + 1);
     this.history.push({ blob, marks: clone(this.marks) });
     while (this.history.length > 2 && (this.history.length > 12 || this.history.reduce((n, s) => n + s.blob.size, 0) > 64 * 1024 * 1024)) this.history.shift();
@@ -1615,20 +1711,27 @@ var ImageEditor = class extends import_obsidian2.Modal {
     return { width: Math.max(2, Math.round(w)), height: Math.max(2, Math.round(h)) };
   }
   async applyCrop() {
+    if (!isValidQuad(this.corners)) throw new Error("Choose a rectangle enclosing a usable area.");
+    const xs = this.corners.map((p) => p.x), ys = this.corners.map((p) => p.y), x = Math.round(Math.min(...xs)), y = Math.round(Math.min(...ys)), w = Math.round(Math.max(...xs)) - x + 1, h = Math.round(Math.max(...ys)) - y + 1;
+    const out = canvas(w, h);
+    ctx(out).drawImage(this.composite(), x, y, w, h, 0, 0, w, h);
+    await this.replaceRaster(out);
+  }
+  boardProcessing() {
+    return {
+      mode: this.boardBackground === "white" ? "whiteboard" : "blackboard",
+      strength: this.strength,
+      adjustments: this.boardSaturation ? { saturation: this.boardSaturation } : void 0
+    };
+  }
+  async applyBoard() {
     if (!isValidQuad(this.corners)) throw new Error("Choose four non-crossing corners enclosing a usable area.");
-    const src = this.composite();
-    if (this.mode === "rectangle") {
-      const xs = this.corners.map((p) => p.x), ys = this.corners.map((p) => p.y), x = Math.round(Math.min(...xs)), y = Math.round(Math.min(...ys)), w = Math.round(Math.max(...xs)) - x + 1, h = Math.round(Math.max(...ys)) - y + 1;
-      const out2 = canvas(w, h);
-      ctx(out2).drawImage(src, x, y, w, h, 0, 0, w, h);
-      await this.replaceRaster(out2);
-      return;
-    }
     const size = this.boardSize();
     canvas(size.width, size.height);
+    const src = this.composite();
     const data = ctx(src).getImageData(0, 0, src.width, src.height);
-    this.status.setText("Correcting perspective and enhancing board\u2026");
-    const result = await this.process({ data: data.data.buffer, width: src.width, height: src.height, corners: this.corners, outWidth: size.width, outHeight: size.height, mode: this.boardBackground === "white" ? "whiteboard" : "blackboard", strength: this.strength });
+    this.status.setText("Applying board correction\u2026");
+    const result = await this.process({ data: data.data.buffer, width: src.width, height: src.height, corners: this.corners, outWidth: size.width, outHeight: size.height, ...this.boardProcessing() });
     if (this.closed) return;
     const out = canvas(result.width, result.height);
     ctx(out).putImageData(new ImageData(new Uint8ClampedArray(result.data), result.width, result.height), 0, 0);
@@ -1637,11 +1740,9 @@ var ImageEditor = class extends import_obsidian2.Modal {
   scheduleBoardPreview() {
     window.clearTimeout(this.previewTimer);
     const version = ++this.previewVersion;
-    if (this.mode === "rectangle" || !this.boardPreview) return;
+    if (this.tool !== "board" || !this.boardPreview) return;
     this.previewTimer = window.setTimeout(() => void this.run(async () => {
-      if (this.closed || this.busy || this.previewRunning || !isValidQuad(this.corners)) return;
-      if (this.mode === "rectangle") return;
-      const mode = this.boardBackground === "white" ? "whiteboard" : "blackboard";
+      if (this.closed || this.busy || this.tool !== "board" || this.previewRunning || !isValidQuad(this.corners)) return;
       this.previewRunning = true;
       try {
         const scale = Math.min(1, 900 / Math.max(this.working.width, this.working.height));
@@ -1652,7 +1753,7 @@ var ImageEditor = class extends import_obsidian2.Modal {
         this.paintMarks(c);
         const points = this.corners.map((p) => ({ x: p.x * (src.width - 1) / Math.max(1, this.working.width - 1), y: p.y * (src.height - 1) / Math.max(1, this.working.height - 1) }));
         const size = this.boardSize(), s = Math.min(1, 700 / Math.max(size.width, size.height));
-        const result = await this.process({ data: ctx(src).getImageData(0, 0, src.width, src.height).data.buffer, width: src.width, height: src.height, corners: points, outWidth: Math.max(2, Math.round(size.width * s)), outHeight: Math.max(2, Math.round(size.height * s)), mode, strength: this.strength });
+        const result = await this.process({ data: ctx(src).getImageData(0, 0, src.width, src.height).data.buffer, width: src.width, height: src.height, corners: points, outWidth: Math.max(2, Math.round(size.width * s)), outHeight: Math.max(2, Math.round(size.height * s)), ...this.boardProcessing() });
         if (version !== this.previewVersion || this.closed || !this.boardPreview) return;
         this.boardPreview.width = result.width;
         this.boardPreview.height = result.height;
@@ -1743,7 +1844,7 @@ var ImageEditor = class extends import_obsidian2.Modal {
     this.estimateTimer = window.setTimeout(() => void this.run(() => this.estimateOutput()), 300);
   }
   async estimateOutput() {
-    if (this.closed || this.dragging) return;
+    if (this.closed || this.dragging || this.textEdit) return;
     if (this.estimating) {
       this.estimateAgain = true;
       return;
@@ -1751,7 +1852,7 @@ var ImageEditor = class extends import_obsidian2.Modal {
     this.estimating = true;
     try {
       do {
-        if (this.dragging) return;
+        if (this.dragging || this.textEdit) return;
         this.estimateAgain = false;
         const version = this.sizeVersion;
         const blob = await this.outputBlob();
@@ -1804,30 +1905,6 @@ var ImageEditor = class extends import_obsidian2.Modal {
       urls.forEach((url) => URL.revokeObjectURL(url));
     };
     modal.open();
-  }
-  askText(initial = "") {
-    return new Promise((resolve) => {
-      const modal = new import_obsidian2.Modal(this.app);
-      modal.titleEl.setText("Annotation text");
-      const input = modal.contentEl.createEl("input", { type: "text", value: initial, attr: { placeholder: "Enter text", "aria-label": "Annotation text" } });
-      let result = null;
-      const add = modal.contentEl.createEl("button", { text: initial ? "Apply text" : "Add text", cls: "mod-cta" });
-      const submit = () => {
-        result = input.value.trim();
-        modal.close();
-      };
-      add.onclick = submit;
-      input.onkeydown = (e) => {
-        if (e.key === "Enter") submit();
-      };
-      this.childModals.add(modal);
-      modal.onClose = () => {
-        this.childModals.delete(modal);
-        resolve(result);
-      };
-      modal.open();
-      input.focus();
-    });
   }
   async prepareBackupPreferences() {
     const current = this.options.getBackupPreferences?.() || { backupEnabled: this.options.backupEnabled, backupFolder: this.options.backupFolder, backupConfigured: this.options.backupConfigured === true };
@@ -2424,7 +2501,7 @@ var ImageToolkit = class extends import_obsidian4.Plugin {
       const offset = editor.posToOffset(editor.getCursor());
       const embed = findImageEmbeds(editor.getValue()).find((e) => e.start <= offset && offset <= e.end);
       const file = embed && view.file && this.resolve(embed.link, view.file.path);
-      if (file && embed && view.file) this.open({ file }, "compress");
+      if (file && embed && view.file) this.open({ file }, "resize");
       else new import_obsidian4.Notice("Place the cursor on a local JPEG, PNG or WebP embed.");
     } });
     const attach = () => {
@@ -2484,7 +2561,7 @@ var ImageToolkit = class extends import_obsidian4.Plugin {
     if (this.extendedMenus.has(menu)) return;
     this.extendedMenus.add(menu);
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Edit image").setIcon("image").onClick(() => this.open(context, "compress")));
+    menu.addItem((item) => item.setTitle("Edit image").setIcon("image").onClick(() => this.open(context, "resize")));
     if (this.settings.backupEnabled) menu.addItem((item) => item.setTitle("Recover image").setIcon("history").onClick(() => this.recover(context)));
   }
   recover(context) {
@@ -2554,6 +2631,8 @@ var ToolkitSettings = class extends import_obsidian4.PluginSettingTab {
     const presets = {
       "<original-name>.<suffix>": "Original name",
       "<original-name>-YYYY-MM-DD.<suffix>": "Original name + date",
+      "<original-name>-YYYY-MM-DD-HHmmss.<suffix>": "Original name + date and time",
+      "<note-name>-YYYY-MM-DD.<suffix>": "Note name + date",
       "<note-name>-YYYY-MM-DD-HHmmss.<suffix>": "Note name + date and time"
     };
     new import_obsidian4.Setting(this.containerEl).setName("Filename preset").addDropdown((dropdown) => dropdown.addOptions({ ...presets, "": "Custom template" }).setValue(this.plugin.settings.imageNameTemplate in presets ? this.plugin.settings.imageNameTemplate : "").onChange(async (value) => {

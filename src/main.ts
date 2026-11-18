@@ -68,7 +68,7 @@ export default class ImageToolkit extends Plugin {
       const offset = editor.posToOffset(editor.getCursor());
       const embed = findImageEmbeds(editor.getValue()).find(e => e.start <= offset && offset <= e.end);
       const file = embed && view.file && this.resolve(embed.link, view.file.path);
-      if (file && embed && view.file) this.open({ file }, 'compress');
+      if (file && embed && view.file) this.open({ file }, 'resize');
       else new Notice('Place the cursor on a local JPEG, PNG or WebP embed.');
     }});
     const attach = () => {
@@ -129,7 +129,7 @@ export default class ImageToolkit extends Plugin {
     if (this.extendedMenus.has(menu)) return;
     this.extendedMenus.add(menu);
     menu.addSeparator();
-    menu.addItem(item=>item.setTitle('Edit image').setIcon('image').onClick(()=>this.open(context,'compress')));
+    menu.addItem(item=>item.setTitle('Edit image').setIcon('image').onClick(()=>this.open(context,'resize')));
     if (this.settings.backupEnabled) menu.addItem(item=>item.setTitle('Recover image').setIcon('history').onClick(()=>this.recover(context)));
   }
 
@@ -195,6 +195,8 @@ class ToolkitSettings extends PluginSettingTab {
     const presets: Record<string, string> = {
       '<original-name>.<suffix>': 'Original name',
       '<original-name>-YYYY-MM-DD.<suffix>': 'Original name + date',
+      '<original-name>-YYYY-MM-DD-HHmmss.<suffix>': 'Original name + date and time',
+      '<note-name>-YYYY-MM-DD.<suffix>': 'Note name + date',
       '<note-name>-YYYY-MM-DD-HHmmss.<suffix>': 'Note name + date and time',
     };
     new Setting(this.containerEl).setName('Filename preset').addDropdown(dropdown => dropdown

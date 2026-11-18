@@ -21,8 +21,8 @@ export async function runLayoutChecks() {
     ++editor.sizeVersion;win.clearTimeout(editor.estimateTimer);editor.working=orientation==='portrait'?portrait:original;editor.invalidateEncodedPreview();editor.resetCorners();
     for(const [width,height] of [[1024,720],[900,600],[800,600],[640,480],[520,600]]) {
       frame.style.width=`${width}px`;frame.style.height=`${height}px`;await settle();
-      for(const tool of ['compress','resize','crop','adjust','annotate']) {
-        editor.tool=tool;editor.mode='board';editor.renderControls();editor.draw();await settle();
+      for(const tool of ['resize','crop','board','adjust','annotate']) {
+        editor.tool=tool;editor.renderControls();editor.draw();await settle();
         const modal=editor.modalEl as HTMLElement,content=editor.contentEl as HTMLElement;
         const bounds=modal.getBoundingClientRect(),footer=doc.querySelector<HTMLElement>('.image-toolkit-footer')!;
         const bottom=footer.getBoundingClientRect();
@@ -37,14 +37,14 @@ export async function runLayoutChecks() {
         assert(footer.contains(quality)&&quality===footerQuality,`${prefix}: quality must stay in the persistent footer`);
         assert(editor.scroll.clientHeight>=75,`${prefix}: preview collapsed`);
         assert(editor.scroll.scrollHeight<=editor.scroll.clientHeight+1&&editor.scroll.scrollWidth<=editor.scroll.clientWidth+1,`${prefix}: fit preview needs scrolling`);
-        if(tool!=='compress') {
-          const action=editor.toolActions.querySelector('button') as HTMLButtonElement;
-          assert(visible(action),`${prefix}: tool action clipped`);
-          if(height>=600&&tool!=='crop')assert(editor.controls.scrollHeight<=editor.controls.clientHeight+1,`${prefix}: default tool controls do not fit`);
-        }
+        const action=editor.toolActions.querySelector('button') as HTMLButtonElement;
+        assert(visible(action),`${prefix}: tool action clipped`);
+        if(height>=600&&tool!=='board')assert(editor.controls.scrollHeight<=editor.controls.clientHeight+1,`${prefix}: default tool controls do not fit`);
         const sections=[...editor.controls.querySelectorAll('details')] as HTMLDetailsElement[];
-        if(tool==='crop'){
+        if(tool==='crop'||tool==='board'){
           assert(sections.find(section=>section.querySelector('summary')?.textContent==='Corner precision')?.open,`${prefix}: corner precision must start unfolded`);
+        }
+        if(tool==='board'){
           const board=editor.boardPreview.getBoundingClientRect(),corner=editor.magnifier.getBoundingClientRect();
           assert(corner.top>=board.bottom+4,`${prefix}: previews must stack vertically`);
         }
